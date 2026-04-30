@@ -1,0 +1,16 @@
+.env
+.conda
+.venv
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+.DS_Store
+.vscode/
+.idea/
+langgraph-react-agent-impl.md
