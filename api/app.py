@@ -19,11 +19,10 @@ from fastapi.responses import StreamingResponse
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from langchain_core.callbacks.base import BaseCallbackHandler
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from pydantic import BaseModel, Field
 
 from agent.graph import build_graph
-from agent.intent import classify_answer_type, classify_query_intent
 from agent.tools import score_source_quality
 
 load_dotenv()
@@ -98,35 +97,13 @@ class _TokenQueueCallbackHandler(BaseCallbackHandler):
 def _resolve_model_name(explicit_model_name: str | None = None) -> str:
     return explicit_model_name or DEFAULT_MODEL_NAME
 
-
-def _resolve_depth_mode(query: str, explicit_depth_mode: str | None = None) -> str:
-    normalized = (explicit_depth_mode or "").strip().lower()
-    valid_modes = {"learning_ml", "standard", "concise"}
-    if normalized in valid_modes:
-        return normalized
-
-    lowered_query = query.lower()
-    if any(keyword in lowered_query for keyword in ["concise", "brief", "short answer", "short version"]):
-        return "concise"
-
-    if any(
-        keyword in lowered_query
-        for keyword in [
-            "explain like i'm learning ml",
-            "explain like i am learning ml",
-            "give intuition + math + example",
-            "intuition + math + example",
-            "intuition, math, and example",
-        ]
-    ):
-        return "learning_ml"
-
-    return "learning_ml"
+def _resolve_temperature() -> float:
+    return float(os.getenv("MODEL_TEMPERATURE", "0.2"))
 
 
 @lru_cache(maxsize=8)
-def _compiled_graph(model_name: str):
-    return build_graph(model_name=model_name)
+def _compiled_graph(model_name: str, temperature: float):
+    return build_graph(model_name=model_name, temperature=temperature)
 
 
 def _dedupe_preserve_order(values: list[str]) -> list[str]:
@@ -279,11 +256,19 @@ def _extract_trace(messages: list[Any], final_answer_reviewed: bool = False) -> 
 
 def _best_available_answer(state: dict[str, Any]) -> str:
     final_answer = str(state.get("final_answer") or "").strip()
-    if final_answer:
+    messages = list(state.get("messages", []))
+
+    retry_cutoff = -1
+    for index, message in enumerate(messages):
+        if isinstance(message, SystemMessage):
+            content = str(message.content or "")
+            if "Validation failed. Retry" in content:
+                retry_cutoff = index
+
+    if final_answer and (bool(state.get("final_answer_reviewed", False)) or retry_cutoff < 0):
         return final_answer
 
-    messages = list(state.get("messages", []))
-    for message in reversed(messages):
+    for message in reversed(messages[retry_cutoff + 1 :]):
         if isinstance(message, AIMessage):
             content = str(message.content or "").strip()
             if content:
@@ -301,12 +286,10 @@ def _best_available_answer(state: dict[str, Any]) -> str:
     return "I could not complete the task with the available evidence."
 
 
-def _build_initial_state(query: str, intent: str, answer_type: str, max_iterations: int) -> dict[str, Any]:
+def _build_initial_state(query: str, depth_mode: str | None, max_iterations: int) -> dict[str, Any]:
     return {
         "messages": [HumanMessage(content=query)],
-        "intent": intent,
-        "answer_type": answer_type,
-        "depth_mode": _resolve_depth_mode(query),
+        "depth_mode": depth_mode or "",
         "tool_calls_made": [],
         "iteration_count": 0,
         "max_iterations": max_iterations,
@@ -329,20 +312,13 @@ def _run_agent_sync(
     callbacks: list[BaseCallbackHandler] | None = None,
 ) -> dict[str, Any]:
     started_at = time.perf_counter()
-    intent = classify_query_intent(query)
-    answer_type = classify_answer_type(query)
-    graph = _compiled_graph(model_name)
-    resolved_depth_mode = _resolve_depth_mode(query, depth_mode)
+    graph = _compiled_graph(model_name, _resolve_temperature())
     state = graph.invoke(
-        {
-            **_build_initial_state(
-                query=query,
-                intent=intent,
-                answer_type=answer_type,
-                max_iterations=max_iterations,
-            ),
-            "depth_mode": resolved_depth_mode,
-        },
+        _build_initial_state(
+            query=query,
+            depth_mode=depth_mode,
+            max_iterations=max_iterations,
+        ),
         config={"callbacks": callbacks or []},
     )
 
@@ -364,13 +340,13 @@ def _run_agent_sync(
 
     return {
         "answer": answer,
-        "intent": intent,
+        "intent": str(state.get("intent", "discovery")),
         "tools_used": tools_used,
         "iterations": int(state.get("iteration_count", 0)),
         "latency_ms": round((time.perf_counter() - started_at) * 1000.0, 2),
         "trace": trace,
         "confidence": confidence,
-        "answer_type": str(state.get("answer_type") or answer_type).strip() or None,
+        "answer_type": str(state.get("answer_type", "explanation")).strip() or None,
         "plan": plan,
         "metrics": metrics,
         "validation_errors": [str(item) for item in state.get("validation_errors", []) if str(item).strip()],
@@ -421,6 +397,8 @@ async def _stream_agent_events(request: QueryRequest) -> AsyncIterator[str]:
     token_queue: "queue.Queue[str | object]" = queue.Queue()
     callback_handler = _TokenQueueCallbackHandler(token_queue)
     result_box: dict[str, Any] = {}
+    done_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
 
     def _worker() -> None:
         try:
@@ -435,25 +413,45 @@ async def _stream_agent_events(request: QueryRequest) -> AsyncIterator[str]:
             result_box["error"] = exc
         finally:
             token_queue.put(DONE_SENTINEL)
+            loop.call_soon_threadsafe(done_event.set)
 
     worker_thread = threading.Thread(target=_worker, daemon=True)
     worker_thread.start()
 
     while True:
-        token = await asyncio.to_thread(token_queue.get)
+        try:
+            token = await asyncio.wait_for(asyncio.to_thread(token_queue.get), timeout=90.0)
+        except asyncio.TimeoutError:
+            if worker_thread.is_alive():
+                worker_thread.join(timeout=3.0)
+            yield f"data: {json.dumps({'type': 'error', 'message': 'Request timeout'}, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"
+            return
         if token is DONE_SENTINEL:
             break
         yield f"data: {json.dumps({'type': 'token', 'text': token}, ensure_ascii=False)}\n\n"
 
-    worker_thread.join(timeout=0.1)
+    try:
+        await asyncio.wait_for(done_event.wait(), timeout=90.0)
+    except asyncio.TimeoutError:
+        if worker_thread.is_alive():
+            worker_thread.join(timeout=3.0)
+        yield f"data: {json.dumps({'type': 'error', 'message': 'Request timeout'}, ensure_ascii=False)}\n\n"
+        yield "data: [DONE]\n\n"
+        return
+    except asyncio.CancelledError:
+        if worker_thread.is_alive():
+            worker_thread.join(timeout=3.0)
+        raise
+    finally:
+        if worker_thread.is_alive():
+            worker_thread.join(timeout=3.0)
 
     if "error" in result_box:
         yield f"data: {json.dumps({'type': 'error', 'message': str(result_box['error'])}, ensure_ascii=False)}\n\n"
-        yield "data: [DONE]\n\n"
-        return
-
-    result = result_box["result"]
-    yield f"data: {json.dumps({'type': 'final', 'result': result}, ensure_ascii=False)}\n\n"
+    else:
+        result = result_box.get("result")
+        yield f"data: {json.dumps({'type': 'final', 'result': result}, ensure_ascii=False)}\n\n"
     yield "data: [DONE]\n\n"
 
 
