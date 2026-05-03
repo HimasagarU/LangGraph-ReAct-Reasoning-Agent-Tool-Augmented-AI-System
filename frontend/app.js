@@ -600,11 +600,7 @@ async function streamQuery() {
 
     if (finalResult) {
       renderResult(finalResult);
-      if (streamedText.trim()) {
-        elements.streamOutput.textContent = streamedText;
-      } else {
-        elements.streamOutput.textContent = finalResult.answer || 'Stream completed.';
-      }
+      elements.streamOutput.textContent = finalResult.answer || streamedText || 'Stream completed.';
     } else if (streamedText.trim()) {
       elements.streamOutput.textContent = streamedText;
     }

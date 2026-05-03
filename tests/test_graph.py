@@ -44,7 +44,7 @@ class _FakeModel:
             index = min(self.agent_calls, len(self.agent_responses) - 1)
             self.agent_calls += 1
             return AIMessage(content=self.agent_responses[index])
-        if "final answer reviewer" in system_text:
+        if "final answer reviewer" in system_text or "strict final answer formatter" in system_text:
             index = min(self.review_calls, len(self.review_responses) - 1)
             self.review_calls += 1
             return AIMessage(content=self.review_responses[index])
@@ -121,6 +121,49 @@ RAG is flexible, while fine-tuning is deeper but costlier."""
         self.assertEqual(state.get("validation_errors"), [])
         self.assertEqual(state.get("final_answer"), improved_answer)
         self.assertIn("| Criterion | RAG | Fine-tuning |", str(state.get("final_answer") or ""))
+
+    def test_retry_loop_does_not_return_stale_draft_answer(self) -> None:
+        fake_model = _FakeModel(
+            agent_responses=[
+                "RAG is different from fine-tuning.",
+                "",
+            ],
+            review_responses=[
+                "RAG is different from fine-tuning.",
+                "RAG is different from fine-tuning.",
+            ],
+        )
+
+        with patch("agent.graph._load_model", return_value=fake_model):
+            graph = build_graph(model_name="test-model")
+            state = graph.invoke(_initial_state("RAG vs fine-tuning", "comparison"))
+
+        self.assertNotEqual(state.get("final_answer"), "RAG is different from fine-tuning.")
+        self.assertNotEqual(str(state.get("final_answer") or ""), "RAG is different from fine-tuning.")
+
+    def test_fact_query_falls_back_after_validation_failure(self) -> None:
+        fake_model = _FakeModel(
+            agent_responses=[
+                "The prize is one million dollars.",
+                "The prize is one million dollars.",
+            ],
+            review_responses=[
+                "The prize is one million dollars.",
+                "The prize is one million dollars.",
+            ],
+        )
+
+        with patch("agent.graph._load_model", return_value=fake_model):
+            graph = build_graph(model_name="test-model")
+            state = graph.invoke(_initial_state("What is the cash prize of the Turing Award?", "fact"))
+
+        answer = str(state.get("final_answer") or "")
+        self.assertTrue(answer.startswith("Value: "))
+        self.assertIn("Unit: n/a", answer)
+        self.assertIn("Source:", answer)
+        self.assertIn("Confidence:", answer)
+        self.assertNotIn("one million dollars", answer.lower())
+        self.assertFalse(state.get("answer_format_ok"))
 
 
 if __name__ == "__main__":

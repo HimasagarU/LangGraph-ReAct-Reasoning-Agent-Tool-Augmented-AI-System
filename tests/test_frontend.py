@@ -4,9 +4,9 @@ import unittest
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 
-from api.app import _extract_sources, _extract_trace, app
+from api.app import _best_available_answer, _extract_sources, _extract_trace, app
 
 FAKE_RESULT = {
     "answer": "RAG stands for Retrieval-Augmented Generation.",
@@ -121,6 +121,22 @@ class FrontendSmokeTests(unittest.TestCase):
         self.assertIn('"result"', body)
         self.assertIn('"trace"', body)
         self.assertEqual(body.count('"type": "final"'), 1)
+
+    def test_best_available_answer_ignores_stale_draft_after_retry(self) -> None:
+        answer = _best_available_answer(
+            {
+                "final_answer": "Stale draft answer.",
+                "final_answer_reviewed": False,
+                "messages": [
+                    AIMessage(content="Stale draft answer."),
+                    SystemMessage(content="Validation failed. Retry with the required structure and use tools if needed."),
+                    AIMessage(content=""),
+                ],
+            }
+        )
+
+        self.assertNotEqual(answer, "Stale draft answer.")
+        self.assertTrue(answer)
 
 
 if __name__ == "__main__":
