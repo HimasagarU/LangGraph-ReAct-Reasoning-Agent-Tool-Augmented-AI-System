@@ -1,0 +1,39 @@
+name: Keep Render Server Alive
+
+on:
+  schedule:
+    # Run every 13 minutes to keep the Render free tier server from spinning down
+    # Render spins down free instances after 15 minutes of inactivity
+    - cron: '*/13 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping-server:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping server health endpoint
+        run: |
+          # Replace YOUR_RENDER_URL with your actual Render deployment URL
+          # Example: https://langgraph-react-agent.onrender.com
+          RENDER_URL="${{ secrets.RENDER_URL }}"
+          
+          if [ -z "$RENDER_URL" ]; then
+            echo "Error: RENDER_URL secret not set"
+            exit 1
+          fi
+          
+          echo "Pinging $RENDER_URL/ping..."
+          response=$(curl -s -w "\n%{http_code}" "$RENDER_URL/ping" || true)
+          http_code=$(echo "$response" | tail -n1)
+          body=$(echo "$response" | head -n-1)
+          
+          echo "Response code: $http_code"
+          echo "Response body: $body"
+          
+          if [ "$http_code" -eq 200 ]; then
+            echo "✓ Server is alive"
+            exit 0
+          else
+            echo "✗ Server health check failed"
+            exit 1
+          fi

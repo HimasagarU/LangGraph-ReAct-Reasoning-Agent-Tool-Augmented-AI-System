@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: langgraph-react-agent
+    runtime: docker
+    plan: free
+    healthCheckPath: /ping
+    maxNonRecurringJobRunTimeoutMinutes: 720
+    envVars:
+      - key: MODEL_NAME
+        value: llama-3.3-70b-versatile
+      - key: MAX_ITERATIONS
+        value: "5"
+      - key: MODEL_TEMPERATURE
+        value: "0.2"
+      - key: GROQ_API_KEY
+        scope: project
+      - key: TAVILY_API_KEY
+        scope: project

@@ -1,0 +1,17 @@
+.git
+.gitignore
+.env
+.env.local
+.vscode
+.idea
+*.pyc
+__pycache__
+.pytest_cache
+.coverage
+*.egg-info
+dist
+build
+node_modules
+tests/
+*.md
+!README.md
