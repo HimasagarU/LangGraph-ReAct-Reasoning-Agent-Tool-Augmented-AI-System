@@ -13,6 +13,7 @@ dist/
 .DS_Store
 .vscode/
 .idea/
+task.md
 langgraph-react-agent-impl.md
 
 .agent_memory.jsonl
