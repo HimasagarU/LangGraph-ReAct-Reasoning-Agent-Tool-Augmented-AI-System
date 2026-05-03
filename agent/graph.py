@@ -21,7 +21,7 @@ from .intent import (
     INTENT_COMPARATIVE,
     INTENT_DISCOVERY,
     INTENT_SOTA,
-    classify_answer_type,
+    route_query,
     extract_math_expression,
     preferred_tools_for_intent,
 )
@@ -35,8 +35,25 @@ DEFAULT_TEMPERATURE = 0.2
 DEFAULT_DEPTH_MODE = "learning_ml"
 VALID_DEPTH_MODES = {"learning_ml", "standard", "concise"}
 MAX_RETRIES = 1
-SYSTEM_TEMPLATE = """You are a production ReAct agent.
+SYSTEM_TEMPLATE = """You are a production ReAct assistant.
 
+Goal:
+- Answer correctly.
+- Put the final answer first.
+- Use the smallest format that fully answers the question.
+- Be precise, conservative, and easy to scan.
+
+Rules:
+- Do not invent facts, categories, dates, or sources.
+- If the evidence is weak or the premise is wrong, say that clearly.
+- For factual questions, answer in 1-3 short lines.
+- For explanations, use a compact TL;DR-first structure.
+- For comparisons, give the verdict first, then a compact table.
+- For calculations, show the result first, then a minimal check.
+- For ambiguous questions, ask exactly one clarification question.
+- Follow the requested response format exactly.
+
+Context:
 Intent: {intent}
 Answer type: {answer_type}
 Depth mode: {depth_mode}
@@ -46,72 +63,85 @@ Execution plan: {execution_plan}
 Current step: {current_step}
 Memory context: {memory_context}
 
-Rules:
-- Use tools when the question benefits from search, lookup, or computation.
-- When calling tools, prefer the rewritten query if it is provided.
-- Follow the execution plan step by step.
-- Prefer the listed tools in order unless another tool is clearly better.
-- Keep reasoning concise.
-- Stop once you can answer confidently.
-- If the iteration limit is reached, return the best available answer from the evidence so far.
-- For comparative claims, only say something is faster, more efficient, more scalable, or better if the retrieved evidence explicitly supports it.
-- For comparisons, do not give a bare fallback like "depends on context". Instead, explain the tradeoffs inside the table or use cases.
-- If information is uncertain, prefer neutral phrasing over definitive claims.
-
 Response format:
 {response_template}
 """
-COMPARISON_TEMPLATE = """1. Definition
-2. Intuition
-3. Table comparison
-4. Use cases
-5. Key insights
+COMPARISON_TEMPLATE = """Verdict: [one-line recommendation or summary]
+
+| Criterion | A | B |
+|---|---|---|
+| [criterion 1] | [A] | [B] |
+| [criterion 2] | [A] | [B] |
+| [criterion 3] | [A] | [B] |
+
+Recommendation: [1-2 short sentences]
 
 Rules:
-- Keep each section to 1-2 short sentences.
-- Include a Markdown table in the comparison section.
-- Compare concrete criteria such as data shape, strengths, weaknesses, training needs, and when to use each one.
-- Include at most 4 criteria in the table.
-- Avoid a bare fallback like "depends on context". If tradeoffs matter, explain them in the table or use cases.
-- Keep the answer grounded in the retrieved evidence.
+- Verdict first.
+- Use only 3-4 criteria.
+- Include tradeoffs, not generic filler.
 """
 
-LEARNING_TEMPLATE = """1. Intuition
-2. Step-by-step process
-3. Formula
-4. Example
-5. Key insights
+EXPLANATION_TEMPLATE = """TL;DR: [one-sentence answer]
+
+1. Intuition
+[1-2 short sentences]
+
+2. Breakdown
+[2-4 short sentences or bullets]
+
+3. Example
+[one concrete example]
+
+4. Key takeaway
+[one short sentence]
 
 Rules:
-- Explain like the reader is learning ML.
-- Give intuition + math + example.
-- Include one short analogy and one why-it-matters sentence.
-- Keep each section to 1-2 short sentences.
-- Keep the answer easy to scan.
+- Keep each section short.
+- Do not force a formula if none is needed.
+- Answer first, explain second.
 """
 
-FACT_TEMPLATE = """Return a direct answer using exactly these labels:
-- Value:
-- Unit:
-- Source:
-- Confidence:
+FACT_TEMPLATE = """Value: [direct answer in one short sentence]
+Unit: n/a
+Source: [1-2 credible sources]
+Confidence: High / Medium / Low
 
 Rules:
-- Put the best direct value first.
-- Use `Unit: n/a` when no unit applies.
+- Put the direct answer in Value.
+- If the premise is wrong, say that in Value.
+- Keep it tight.
 - Do not add extra sections.
 """
 
-LIST_TEMPLATE = """Return a clean bullet list of the requested items."""
-
-CALC_TEMPLATE = """Return the final result with minimal steps.
+LIST_TEMPLATE = """Answer:
+- [item 1]
+- [item 2]
+- [item 3]
 
 Rules:
-- Include the numeric result clearly.
-- Do not use web search when direct calculation is sufficient.
+- Keep items short.
+- Order from most relevant to least relevant.
+- No long paragraphs.
 """
 
-AMBIGUOUS_TEMPLATE = """Ask one short clarification question to disambiguate the request."""
+CALC_TEMPLATE = """Result: [final numeric answer]
+
+Check: [very short verification]
+
+Rules:
+- Show the result first.
+- Keep steps minimal.
+- Do not use web search unless needed.
+"""
+
+AMBIGUOUS_TEMPLATE = """Clarify one thing: [one short clarification question]
+
+Rules:
+- Ask exactly one question.
+- Do not answer yet.
+- No extra explanation.
+"""
 _URL_PATTERN = re.compile(r"https?://[^\s)]+")
 _MONTH_PATTERN = re.compile(
     r"\b(january|february|march|april|may|june|july|august|september|october|november|december)\b",
@@ -131,23 +161,23 @@ def _resolve_temperature() -> float:
         return DEFAULT_TEMPERATURE
 
 
+def _resolve_model_temperature(answer_type: str) -> float:
+    if answer_type == ANSWER_FACT:
+        return 0.0
+    return _resolve_temperature()
+
+
 @lru_cache(maxsize=8)
-def _load_model(model_name: str) -> ChatGroq:
-    api_key = os.getenv("GROQ_API_KEY")
+def _load_model(model_name: str, temperature: float, api_key: str) -> ChatGroq:
     if not api_key:
         raise RuntimeError("GROQ_API_KEY is required to run the agent.")
 
     return ChatGroq(
         model=model_name,
-        temperature=_resolve_temperature(),
+        temperature=temperature,
         streaming=True,
         groq_api_key=api_key,
     )
-
-
-def _build_system_message(intent: str, answer_type: str, rewritten_query: str) -> SystemMessage:
-    return _build_system_message_for_depth(intent, DEFAULT_DEPTH_MODE, answer_type, rewritten_query)
-
 
 def _build_system_message_for_depth(
     intent: str,
@@ -184,12 +214,6 @@ def _build_forced_tool_instruction(answer_type: str, tool_calls_made: list[str])
     if answer_type == ANSWER_AMBIGUOUS:
         return "Ask one clarification question only. Do not search."
 
-    if answer_type in {ANSWER_FACT, ANSWER_COMPARISON} and not search_tools_used:
-        return "You must call a search or lookup tool before answering."
-
-    if answer_type == ANSWER_LIST and not search_tools_used:
-        return "Use a search or lookup tool if it helps gather the requested list."
-
     return ""
 
 
@@ -218,12 +242,29 @@ def _build_plan(intent: str, answer_type: str, query: str) -> list[str]:
 def _build_planner_node(model_name: str):
     def planner_node(state: AgentState) -> dict[str, Any]:
         query = _extract_user_query(list(state.get("messages", [])))
-        intent = str(state.get("intent", INTENT_DISCOVERY))
-        answer_type = _resolve_answer_type(state)
+        
+        # Route the query if not already done
+        if not state.get("intent") or not state.get("answer_type"):
+            route_res = route_query(query)
+            intent = route_res["intent"]
+            answer_type = route_res["answer_type"]
+            route_source = route_res["route_source"]
+            classifier_confidence = route_res["confidence"]
+        else:
+            intent = str(state.get("intent", INTENT_DISCOVERY))
+            answer_type = _resolve_answer_type(state)
+            route_source = str(state.get("route_source", "unknown"))
+            classifier_confidence = float(state.get("classifier_confidence", 0.0))
+
         plan = _build_plan(intent, answer_type, query)
         memory_context = format_memory_context(query, limit=2)
 
         return {
+            "intent": intent,
+            "answer_type": answer_type,
+            "route_source": route_source,
+            "classifier_confidence": classifier_confidence,
+            "classifier_label": intent if route_source == "classifier" else "",
             "plan": plan,
             "plan_index": 0,
             "memory_context": memory_context,
@@ -250,11 +291,10 @@ def _build_response_template(intent: str, depth_mode: str, answer_type: str) -> 
 
     if answer_type == ANSWER_COMPARISON or intent == INTENT_COMPARATIVE:
         return COMPARISON_TEMPLATE
-
     if depth_mode == "concise":
-        return LEARNING_TEMPLATE + "\n- Keep each section brief, but still include an example and a step breakdown."
+        return EXPLANATION_TEMPLATE + "\n- Keep each section brief, but still include an example and a step breakdown."
 
-    return LEARNING_TEMPLATE
+    return EXPLANATION_TEMPLATE
 
 
 def _extract_user_query(messages: list[Any]) -> str:
@@ -385,7 +425,7 @@ def _resolve_answer_type(state: AgentState) -> str:
 
     query = _extract_user_query(list(state.get("messages", [])))
     if query:
-        return classify_answer_type(query)
+        return route_query(query)["answer_type"]
 
     return ANSWER_EXPLANATION
 
@@ -421,72 +461,64 @@ def _answer_quality_issues(
     def has_table() -> bool:
         return any("|" in line for line in answer.splitlines())
 
-    def has_example() -> bool:
-        return any(token in normalized_answer for token in ["example", "for example", "for instance", "e.g."])
-
     def has_tradeoff_language() -> bool:
         return any(
             token in normalized_answer
             for token in ["tradeoff", "trade-off", "best for", "better when", "use case", "works well", "less suited"]
         )
 
-    def is_too_dense() -> bool:
-        non_empty_lines = [line.strip() for line in answer.splitlines() if line.strip()]
-        if not non_empty_lines:
-            return True
-        if len(answer) > 1800 and len(non_empty_lines) < 6:
-            return True
-        return any(len(line) > 260 for line in non_empty_lines)
-
-    def looks_like_fact_value() -> bool:
-        if re.search(r"\d", answer):
-            return True
-        if _MONTH_PATTERN.search(answer):
-            return True
-        return bool(re.search(r"(?im)^value:\s*\S+", answer))
-
     if answer_type == ANSWER_COMPARISON or intent == INTENT_COMPARATIVE:
         if not has_table():
             issues.append("missing comparison table")
         if not has_tradeoff_language():
-            issues.append("missing tradeoff or use-case guidance")
+            issues.append("missing tradeoff guidance")
         if "depends on context" in normalized_answer:
             issues.append("bare fallback phrase")
     elif answer_type == ANSWER_FACT:
-        if not search_tools_used:
-            issues.append("no search tool used for fact answer")
-        if not looks_like_fact_value():
-            issues.append("missing direct value")
-        if "source" not in normalized_answer:
-            issues.append("missing source label")
-        if "confidence" not in normalized_answer:
-            issues.append("missing confidence label")
+        if not answer.strip():
+            issues.append("empty answer")
     elif answer_type == ANSWER_LIST:
         if not re.search(r"(?m)^(?:[-*]\s+|\d+\.)", answer):
             issues.append("missing bullet list")
     elif answer_type == ANSWER_CALCULATION:
-        if not re.search(r"\d", answer):
+        if not re.search(r"(?im)^result:\s*", answer) and not re.search(r"\d", answer):
             issues.append("missing numeric result")
     elif answer_type == ANSWER_AMBIGUOUS:
-        if answer.count("?") != 1 or not answer.strip().endswith("?"):
+        stripped = answer.strip()
+        if not stripped.endswith("?") or stripped.count("?") != 1:
             issues.append("must ask exactly one clarification question")
-        if not any(token in normalized_answer for token in ["clarify", "which", "do you mean", "are you asking"]):
-            issues.append("missing clarification question")
         if re.search(r"(?im)^(?:value|source|confidence|result):", answer):
             issues.append("should not answer before clarification")
     else:
+        if not re.search(r"(?im)^tl;dr:\s*", answer):
+            issues.append("missing TL;DR")
         if len(answer.strip()) < 40:
             issues.append("answer too short")
         if depth_mode == "learning_ml":
-            if not any(token in normalized_answer for token in ["intuition", "example", "formula"]):
+            if not any(token in normalized_answer for token in ["intuition", "example", "formula", "breakdown"]):
                 issues.append("missing learning-style structure")
-        if depth_mode == "concise" and has_text("step-by-step process") and len(answer) > 1200:
-            issues.append("too long for concise mode")
 
     return issues
 
 
-def _build_agent_node(model_name: str):
+def _safe_fallback_answer(answer_type: str) -> str:
+    if answer_type == ANSWER_FACT:
+        return "Value: Information not found from the available sources.\nUnit: n/a\nSource: Tool results\nConfidence: Medium"
+    if answer_type == ANSWER_COMPARISON:
+        return (
+            "Verdict: Unable to verify a reliable comparison from available sources.\n\n"
+            "Recommendation: Review more authoritative sources and retry."
+        )
+    if answer_type == ANSWER_LIST:
+        return "Answer:\n- Information not found from the available sources."
+    if answer_type == ANSWER_CALCULATION:
+        return "Result: Calculation could not be verified.\nCheck: Unable to validate with available evidence."
+    if answer_type == ANSWER_AMBIGUOUS:
+        return "Clarify one thing: Could you clarify what you mean?"
+    return "I could not produce a reliable answer from the available sources."
+
+
+def _build_agent_node(model_name: str, temperature: float):
     tools = build_tools()
 
     def agent_node(state: AgentState) -> dict[str, Any]:
@@ -504,6 +536,7 @@ def _build_agent_node(model_name: str):
         memory_context = str(state.get("memory_context") or "").strip() or format_memory_context(user_query, limit=2)
         tool_calls_made = list(state.get("tool_calls_made", []))
         forced_instruction = _build_forced_tool_instruction(answer_type, tool_calls_made)
+        effective_temperature = _resolve_model_temperature(answer_type)
 
         if answer_type == ANSWER_AMBIGUOUS and user_query:
             clarification = f'Could you clarify what you mean by "{user_query.strip()}"?'
@@ -543,7 +576,7 @@ def _build_agent_node(model_name: str):
                     "answer_format_ok": False,
                     "metrics": {"plan_length": len(plan), "steps": int(state.get("iteration_count", 0))},
                 }
-        model = _load_model(model_name)
+        model = _load_model(model_name, effective_temperature, os.getenv("GROQ_API_KEY", ""))
         model_with_tools = model.bind_tools(tools)
         system_message = _build_system_message_for_depth(
             intent,
@@ -568,6 +601,8 @@ def _build_agent_node(model_name: str):
             "plan_index": min(plan_index + 1, len(plan)),
             "rewritten_query": rewritten_query,
             "memory_context": memory_context,
+            "final_answer": "",
+            "final_answer_reviewed": False,
             "needs_retry": False,
             "confidence": confidence,
             "validation_errors": [],
@@ -589,7 +624,7 @@ def _build_agent_node(model_name: str):
     return agent_node, tools
 
 
-def _build_review_node(model_name: str):
+def _build_review_node(model_name: str, temperature: float):
     def review_node(state: AgentState) -> dict[str, Any]:
         messages = list(state.get("messages", []))
         draft_answer = str(state.get("final_answer") or "").strip()
@@ -620,44 +655,27 @@ def _build_review_node(model_name: str):
                 "validation_errors": issues,
             }
 
-        model = _load_model(model_name)
+        effective_temperature = _resolve_model_temperature(answer_type)
+        model = _load_model(model_name, effective_temperature, os.getenv("GROQ_API_KEY", ""))
 
         prompt = [
             SystemMessage(
-                content="""You are a final answer reviewer.
+                content="""You are an extremely strict final-answer formatter and verifier.
 
-Required output structure:
+Required output structure (answer-first):
 {response_template}
 
-Review rules:
-- Check whether any statement is misleading, overly general, too certain, too dense, or unsupported.
-- Do not add new facts.
-- Do not add new sources, URLs, numbers, or named entities that are not already in the draft or evidence.
-- Do not use a bare fallback like "depends on context".
-- If a comparison is not fully supported, explain the tradeoffs inside the table or use cases instead.
-- Preserve the required structure.
-- Fix the issues listed below.
+Question: {query}
+Evidence: {evidence}
 
-Issues to fix:
-{issues}
+Previous issues: {issues}
 
-Question:
-{query}
-
-Intent:
-{intent}
-
-Answer type:
-{answer_type}
-
-Depth mode:
-{depth_mode}
-
-Draft answer:
-{draft_answer}
-
-Evidence:
-{evidence}
+Instructions:
+- Return the direct answer first, then a one-line justification, then caveats if needed, then sources/confidence when applicable.
+- Fix ALL format issues.
+- Do not add information not present in the evidence.
+- Be precise with names, dates, and categories.
+- Return nothing except the correctly formatted answer.
 """.format(
                     response_template=_build_response_template(intent, depth_mode, answer_type),
                     issues="\n".join(f"- {issue}" for issue in issues) if issues else "- None",
@@ -669,7 +687,7 @@ Evidence:
                     evidence=evidence,
                 )
             ),
-            HumanMessage(content="Rewrite the draft and return only the final answer."),
+            HumanMessage(content="Rewrite the draft and return only the final answer in the required format."),
         ]
 
         revised_answer = draft_answer
@@ -690,15 +708,16 @@ Evidence:
             prompt[0] = SystemMessage(
                 content="""You are a final answer reviewer.
 
-Required output structure:
+Required output structure (answer-first):
 {response_template}
 
 Review rules:
+- Ensure the direct answer appears first, then a concise justification, then caveats, then sources/confidence when applicable.
 - Check whether any statement is misleading, overly general, too certain, too dense, or unsupported.
 - Do not add new facts.
 - Do not add new sources, URLs, numbers, or named entities that are not already in the draft or evidence.
 - Do not use a bare fallback like "depends on context".
-- If a comparison is not fully supported, explain the tradeoffs inside the table or use cases instead.
+- If a comparison is not fully supported, explain the tradeoffs inside the table or use cases.
 - Preserve the required structure.
 - Fix the issues listed below.
 
@@ -780,9 +799,22 @@ def _build_validate_node():
                         )
                     )
                 ],
+                "final_answer": "",
                 "final_answer_reviewed": False,
                 "retry_count": retry_count,
                 "needs_retry": True,
+                "validation_errors": issues,
+                "answer_format_ok": False,
+            }
+
+        if issues:
+            safe_answer = _safe_fallback_answer(answer_type)
+            return {
+                "messages": [AIMessage(content=safe_answer)],
+                "final_answer": safe_answer,
+                "final_answer_reviewed": True,
+                "retry_count": retry_count,
+                "needs_retry": False,
                 "validation_errors": issues,
                 "answer_format_ok": False,
             }
@@ -867,11 +899,12 @@ def _should_retry_after_validation(state: AgentState) -> str:
 
 
 @lru_cache(maxsize=8)
-def build_graph(model_name: str | None = None):
+def build_graph(model_name: str | None = None, temperature: float | None = None):
     resolved_model_name = _resolve_model_name(model_name)
+    resolved_temperature = _resolve_temperature() if temperature is None else temperature
     planner_node = _build_planner_node(resolved_model_name)
-    agent_node, tools = _build_agent_node(resolved_model_name)
-    review_node = _build_review_node(resolved_model_name)
+    agent_node, tools = _build_agent_node(resolved_model_name, resolved_temperature)
+    review_node = _build_review_node(resolved_model_name, resolved_temperature)
     validate_node = _build_validate_node()
     tool_node = ToolNode(tools)
 
