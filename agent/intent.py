@@ -1,7 +1,39 @@
 from __future__ import annotations
 
 import re
-from typing import Final
+import os
+import json
+import pathlib
+from typing import Final, Any
+
+try:
+    from .classifier import IntentClassifier
+except Exception:
+    IntentClassifier = None  # optional dependency at runtime
+
+# instantiate classifier once (if model file exists)
+_CLASSIFIER: IntentClassifier | None = None
+if IntentClassifier is not None:
+    try:
+        _CLASSIFIER = IntentClassifier()
+    except Exception:
+        _CLASSIFIER = None
+
+# simple JSONL logger for classifier decisions
+_LOG_PATH = pathlib.Path(__file__).parent / "intent_logs.jsonl"
+
+def _log_classification(query: str, predicted: str | None, confidence: float | None, fallback: str | None = None) -> None:
+    entry = {
+        "query": query,
+        "predicted": predicted,
+        "confidence": confidence,
+        "fallback": fallback,
+    }
+    try:
+        with _LOG_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
 INTENT_EXPLANATORY = "explanatory"
 INTENT_SOTA = "sota"
@@ -197,23 +229,63 @@ def classify_query_intent(query: str) -> str:
 
     Returns one of: explanatory, sota, comparative, technical, discovery.
     """
+    res = route_query(query)
+    return res["intent"]
+
+
+def route_query(query: str) -> dict[str, Any]:
+    """
+    Canonical router entry point.
+    Returns: { intent, answer_type, confidence, route_source }
+    """
+    answer_type = classify_answer_type(query)
     query_stripped = query.strip()
 
+    # 1. Regex fast-path
     for pattern, intent in _INTENT_RULES:
         if pattern.search(query_stripped):
-            return intent
+            _log_classification(query_stripped, intent, 1.0, fallback=None)
+            return {
+                "intent": intent,
+                "answer_type": answer_type,
+                "confidence": 1.0,
+                "route_source": "regex"
+            }
 
-    lowered = query_stripped.lower()
-    if lowered.endswith("?") and len(lowered.split()) <= 3:
-        return INTENT_DISCOVERY
+    # 2. ML Classifier
+    if _CLASSIFIER is not None:
+        try:
+            label, proba = _CLASSIFIER.predict_with_threshold(query_stripped, threshold=0.75)
+            _log_classification(query_stripped, label, proba, fallback=None)
+            if label is not None:
+                return {
+                    "intent": label,
+                    "answer_type": answer_type,
+                    "confidence": proba,
+                    "route_source": "classifier"
+                }
+        except Exception:
+            _log_classification(query_stripped, None, None, fallback="classifier_error")
 
-    return INTENT_DISCOVERY
+    # 3. Safe fallback
+    fallback_intent = INTENT_DISCOVERY
+    _log_classification(query_stripped, fallback_intent, None, fallback="fallback")
+    return {
+        "intent": fallback_intent,
+        "answer_type": answer_type,
+        "confidence": 0.0,
+        "route_source": "fallback"
+    }
 
 
 def classify_answer_type(query: str) -> str:
     """Classify the expected answer format for the query."""
     q = query.lower().strip()
     padded_q = f" {q} "
+
+    # Critical edge cases: binary factual prefixes and math detection.
+    if q.startswith(("is ", "was ", "are ", "does ", "did ")):
+        return ANSWER_FACT
 
     if any(token in q for token in _FACT_TERMS):
         return ANSWER_FACT
@@ -230,6 +302,7 @@ def classify_answer_type(query: str) -> str:
     if is_ambiguous_query(q):
         return ANSWER_AMBIGUOUS
 
+    # Short queries are likely ambiguous
     if len(q.split()) <= 2:
         return ANSWER_AMBIGUOUS
 
