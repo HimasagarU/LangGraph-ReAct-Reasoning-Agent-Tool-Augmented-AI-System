@@ -1,6 +1,6 @@
 # LangGraph ReAct Agent
 
-A structured reasoning agent built using LangGraph and Groq that performs multi-step reasoning with tool usage (search, Wikipedia, calculator) and generates formatted, explainable answers.
+A high-precision reasoning agent built using LangGraph and Groq that performs multi-step reasoning, handles complex multi-intent queries, and enforces factual grounding via tool-augmented search.
 
 The system is designed for **learning, comparison, and structured reasoning tasks**, rather than general-purpose question answering.
 
@@ -12,22 +12,21 @@ It includes a browser frontend served from the same FastAPI app, so the health e
 User Query
     |
     v
-Intent Classifier
+Intent Classifier (Multi-intent Detection)
     |
     v
 LangGraph StateGraph
     |
-    +--> agent node (Groq LLM with tools)
+    +--> agent node (Groq LLM)
     |         |
-    |         +--> tool calls
-    |                 |
+    |         +--> Task Splitting Engine
     |                 +--> Tavily Search
     |                 +--> Wikipedia Lookup
     |                 +--> Calculator
     |
     +--> tool node
     |
-    +--> review node (checks wording and claims)
+    +--> review node (factual grounding check)
     |
     +--> loop guard (max 5 iterations)
     |
@@ -37,12 +36,14 @@ Final answer + trace
 
 ## Features
 
+- **Multi-intent routing (Work in Progress)**: Task-splitting for complex queries (e.g., "explain X and calculate Y").
 - Intent-aware tool routing for explanatory, SOTA, comparative, technical, and discovery queries.
+- Hardened factual grounding: forces tool usage for factual queries and rejects "unknown" hallucinations.
 - Three tools: Tavily web search, Wikipedia lookup, and a safe calculator.
-- Structured JSON response with traceability.
+- Structured JSON response with traceability and execution metrics.
 - Final answer review pass to reduce misleading or overly general claims.
 - Intent-specific answer templates for comparison questions and ML-learning style explanations.
-- SSE streaming endpoint for token events.
+- SSE streaming endpoint for token events and live trace updates.
 
 ## What This System Does Well
 
@@ -140,10 +141,11 @@ These include:
 
 - A fixed answer structure for comparison questions: Definition, Intuition, Table comparison, Use cases, Key insights.
 - A fixed answer structure for learning-style questions: Intuition, Step-by-step process, Formula, Example, Key insights.
-- A claim verification constraint: only describe something as faster, more efficient, more scalable, or better when the retrieved evidence explicitly supports that claim.
-- Uncertainty handling: when evidence is weak or mixed, prefer neutral phrasing over definitive conclusions.
-- A final answer review pass that rewrites statements that appear misleading, overly broad, or overconfident.
-- Technical grounding through the current tool set, with graceful fallback behavior when source retrieval is weak or unavailable.
+- **Factual Grounding Guardrails**: If an intent is classified as `fact`, the agent is prohibited from answering without invoking a search tool. It will automatically re-run the retrieval loop if it tries to hallucinate "information not specified."
+- **Task Isolation (WIP)**: For multi-intent queries, the system spawns isolated execution contexts for each subtask, preventing prompt leakage and ensuring each part follows its specific formatting template.
+- **Uncertainty handling**: when evidence is weak or mixed, prefer neutral phrasing over definitive conclusions.
+- **A final answer review pass** that rewrites statements that appear misleading, overly broad, or overconfident.
+- **Technical grounding** through the current tool set, with graceful fallback behavior when source retrieval is weak or unavailable.
 
 For stricter technical accuracy, the next routing upgrade should add paper and documentation sources such as arXiv summaries, official docs, Stanford CS notes, or DeepLearning.ai material.
 
