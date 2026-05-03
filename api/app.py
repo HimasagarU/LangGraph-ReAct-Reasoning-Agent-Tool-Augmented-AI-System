@@ -373,6 +373,22 @@ async def health() -> HealthResponse:
     )
 
 
+@app.get("/styles.css", include_in_schema=False)
+async def frontend_styles() -> FileResponse:
+    css_file = FRONTEND_DIR / "styles.css"
+    if not css_file.exists():
+        raise HTTPException(status_code=404, detail="CSS asset not available.")
+    return FileResponse(css_file, media_type="text/css")
+
+
+@app.get("/app.js", include_in_schema=False)
+async def frontend_script() -> FileResponse:
+    js_file = FRONTEND_DIR / "app.js"
+    if not js_file.exists():
+        raise HTTPException(status_code=404, detail="JS asset not available.")
+    return FileResponse(js_file, media_type="application/javascript")
+
+
 @app.get("/", include_in_schema=False)
 async def root() -> FileResponse:
     index_file = FRONTEND_DIR / "index.html"
