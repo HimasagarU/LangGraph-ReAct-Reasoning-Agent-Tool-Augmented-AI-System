@@ -9,6 +9,8 @@ from urllib.parse import quote
 from urllib.parse import urlparse
 from typing import Any
 
+import logging
+
 import requests
 from langchain_community.tools import WikipediaQueryRun
 from langchain_community.utilities import WikipediaAPIWrapper
@@ -30,6 +32,14 @@ _WIKIPEDIA_HEADERS = {
     "User-Agent": "LangGraphReActAgent/1.0 (https://github.com/himas/langgraph-react-agent)",
     "Accept": "application/json",
 }
+
+def _handle_tool_error(tool_name: str, exc: Exception) -> str:
+    """Centralized tool error handling."""
+    error_msg = str(exc)
+    logging.warning(f"[{tool_name}] failed: {error_msg}")
+    if isinstance(exc, requests.exceptions.Timeout):
+        return f"{tool_name} failed: Request timed out."
+    return f"{tool_name} failed: {error_msg}"
 
 
 def _stringify_tool_output(payload: Any) -> str:
@@ -144,7 +154,7 @@ def _fallback_wikipedia_summary(query: str) -> str:
             "format": "json",
             "utf8": 1,
         },
-        timeout=8,
+        timeout=5,
     )
     search_response.raise_for_status()
     search_payload = search_response.json()
@@ -159,7 +169,7 @@ def _fallback_wikipedia_summary(query: str) -> str:
     summary_response = requests.get(
         f"https://en.wikipedia.org/api/rest_v1/page/summary/{quote(page_title)}",
         headers=_WIKIPEDIA_HEADERS,
-        timeout=8,
+        timeout=5,
     )
     summary_response.raise_for_status()
     summary_payload = summary_response.json()
@@ -194,7 +204,7 @@ def tavily_search(query: str) -> str:
             include_images=False,
         )
     except Exception as exc:
-        return f"Tavily search failed: {exc}"
+        return _handle_tool_error("Tavily search", exc)
 
     return _format_tavily_results(result)
 
@@ -216,7 +226,7 @@ def wikipedia_lookup(query: str) -> str:
     try:
         return _clean_text(_fallback_wikipedia_summary(query), 420)
     except Exception as exc:
-        return f"Wikipedia lookup failed: {exc}"
+        return _handle_tool_error("Wikipedia lookup", exc)
 
 
 @tool("calculator")
