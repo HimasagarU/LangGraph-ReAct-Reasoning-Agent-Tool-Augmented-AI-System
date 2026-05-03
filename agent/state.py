@@ -10,6 +10,7 @@ class AgentState(TypedDict, total=False):
     messages: Annotated[list[BaseMessage], add_messages]
     intent: str
     answer_type: str
+    subtasks: list[str]
     route_source: str
     classifier_confidence: float
     classifier_label: str

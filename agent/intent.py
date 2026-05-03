@@ -47,6 +47,7 @@ ANSWER_EXPLANATION = "explanation"
 ANSWER_COMPARISON = "comparison"
 ANSWER_CALCULATION = "calculation"
 ANSWER_AMBIGUOUS = "ambiguous"
+ANSWER_MULTI = "multi"
 
 STOPWORDS: Final[set[str]] = {
     "a",
@@ -233,6 +234,21 @@ def classify_query_intent(query: str) -> str:
     return res["intent"]
 
 
+def detect_multi_intent(query: str) -> list[str] | None:
+    has_math = contains_math_expression(query)
+    lowered = query.lower()
+    has_explain = any(k in lowered for k in ["explain", "why"])
+    has_compare = any(k in lowered for k in ["vs", "better", "compare", "difference"])
+
+    intents = []
+    if has_explain or has_compare:
+        intents.append("explanation")
+    if has_math:
+        intents.append("calculation")
+
+    return intents if len(intents) > 1 else None
+
+
 def route_query(query: str) -> dict[str, Any]:
     """
     Canonical router entry point.
@@ -240,6 +256,17 @@ def route_query(query: str) -> dict[str, Any]:
     """
     answer_type = classify_answer_type(query)
     query_stripped = query.strip()
+
+    multi = detect_multi_intent(query_stripped)
+    if multi:
+        _log_classification(query_stripped, ANSWER_MULTI, 1.0, fallback=None)
+        return {
+            "intent": ANSWER_MULTI,
+            "answer_type": ANSWER_MULTI,
+            "subtasks": multi,
+            "confidence": 1.0,
+            "route_source": "multi_heuristic"
+        }
 
     # 1. Regex fast-path
     for pattern, intent in _INTENT_RULES:
