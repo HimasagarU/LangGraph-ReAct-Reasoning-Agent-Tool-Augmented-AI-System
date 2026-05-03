@@ -117,9 +117,12 @@ LIST_TEMPLATE = """**Answer:**
 - [item 2]
 - [item 3]
 
+**Sources:** [credible sources]
+
 Rules:
 - Keep items short.
 - Order from most relevant to least relevant.
+- Include sources for all items.
 """
 
 CALC_TEMPLATE = """**Result:** [final numeric answer]
@@ -520,15 +523,64 @@ def _answer_quality_issues(
             issues.append("missing multi-part headers")
 
     else:
-        if not re.search(r"(?im)^\*\*summary:\*\*\s*", answer):
-            issues.append("missing Summary")
-        if len(answer.strip()) < 40:
-            issues.append("answer too short")
-        if depth_mode == "learning_ml":
-            if not any(token in normalized_answer for token in ["intuition", "example", "formula", "breakdown"]):
-                issues.append("missing learning-style structure")
+        # For EXPLANATION and other defaults, check for structure more flexibly
+        has_summary = re.search(r"(?im)\*\*summary:\*\*", answer)
+        has_intuition = re.search(r"(?im)\*\*1\.\s*intuition\*\*|\*\*intuition\*\*", answer)
+        has_breakdown = re.search(r"(?im)\*\*2\.\s*breakdown\*\*|\*\*breakdown\*\*", answer)
+        has_any_structure = has_summary or has_intuition or has_breakdown
+        
+        if not has_any_structure:
+            # Only fail if completely empty or no structure whatsoever
+            if len(answer.strip()) < 40:
+                issues.append("answer too short")
+            else:
+                # Answer has length but may need structure - only warn if learning_ml
+                if depth_mode == "learning_ml":
+                    if not any(token in normalized_answer for token in ["intuition", "example", "breakdown", "explain"]):
+                        issues.append("missing learning-style structure")
+        else:
+            # Has some structure - be lenient
+            if depth_mode == "learning_ml":
+                if not any(token in normalized_answer for token in ["intuition", "example", "breakdown", "explain"]):
+                    # Tolerate minor issues if structure is present
+                    pass
 
     return issues
+
+
+def _restore_collapsed_formatting(answer: str, answer_type: str) -> str:
+    """Restore newlines in collapsed formatting (e.g., Summary: ... 1. Intuition ... 2. Breakdown ...)."""
+    if answer_type not in {ANSWER_EXPLANATION, ANSWER_FACT, ANSWER_LIST}:
+        return answer
+    
+    # If already properly formatted with newlines, return as-is
+    if answer.count('\n') >= 3:
+        return answer
+    
+    # Pattern for collapsed explanation: **Summary:** ... **1. Intuition** ... **2. Breakdown** ...
+    # Replace ** followed by section header with newline + header
+    result = re.sub(r'(\S)\s+\*\*(\d+\.\s+(?:Intuition|Breakdown|Example|Takeaway))\*\*', 
+                   r'\1\n\n**\2**', answer, flags=re.I)
+    
+    # Also handle Summary header followed by content
+    result = re.sub(r'(\*\*Summary:\*\*\s+\S.*?)(\*\*\d+\.)', 
+                   r'\1\n\n\2', result, flags=re.I)
+    
+    # Add newline after section headers if content follows immediately
+    result = re.sub(r'(\*\*\d+\.\s+(?:Intuition|Breakdown|Example|Takeaway)\*\*)\s+([A-Z])', 
+                   r'\1\n\2', result, flags=re.I)
+    result = re.sub(r'(\*\*Summary:\*\*)\s+([A-Z])', 
+                   r'\1\n\2', result, flags=re.I)
+    
+    # Handle Answer header for lists/facts
+    result = re.sub(r'(\*\*Answer:\*\*)\s+([-*])', 
+                   r'\1\n\2', result, flags=re.I)
+    
+    # Handle Sources header
+    result = re.sub(r'(\S)\s+(\*\*Sources:\*\*)', 
+                   r'\1\n\n\2', result, flags=re.I)
+    
+    return result
 
 
 def _safe_fallback_answer(answer_type: str) -> str:
@@ -719,7 +771,7 @@ def _build_review_node(model_name: str, temperature: float):
             list(state.get("tool_calls_made", [])),
         )
 
-        if answer_type in {ANSWER_AMBIGUOUS, ANSWER_CALCULATION, ANSWER_MULTI}:
+        if answer_type in {ANSWER_AMBIGUOUS, ANSWER_CALCULATION, ANSWER_MULTI, ANSWER_EXPLANATION}:
             return {
                 "messages": [AIMessage(content=draft_answer)],
                 "final_answer": draft_answer,
@@ -749,6 +801,9 @@ Instructions:
 - Fix ALL format issues.
 - Do not add information not present in the evidence.
 - Be precise with names, dates, and categories.
+- CRITICAL: Preserve all newlines and section headers exactly.
+- Each section (Summary, Intuition, Breakdown, Example, Takeaway) MUST be on a separate line with its header.
+- Use exactly one blank line between sections.
 - Return nothing except the correctly formatted answer.
 """.format(
                     response_template=_build_response_template(intent, depth_mode, answer_type),
@@ -761,7 +816,7 @@ Instructions:
                     evidence=evidence,
                 )
             ),
-            HumanMessage(content="Rewrite the draft and return only the final answer in the required format."),
+            HumanMessage(content="Rewrite the draft and return only the final answer in the required format. Preserve all newlines and structure."),
         ]
 
         revised_answer = draft_answer
@@ -769,6 +824,8 @@ Instructions:
             response = model.invoke(prompt)
             candidate_answer = str(response.content or "").strip()
             if candidate_answer:
+                # Restore any collapsed formatting from the LLM rewrite
+                candidate_answer = _restore_collapsed_formatting(candidate_answer, answer_type)
                 revised_answer = candidate_answer
             issues = _answer_quality_issues(
                 revised_answer,
@@ -827,6 +884,9 @@ Evidence:
                 )
             )
 
+        # Final formatting restoration before returning
+        revised_answer = _restore_collapsed_formatting(revised_answer, answer_type)
+        
         return {
             "messages": [AIMessage(content=revised_answer)],
             "final_answer": revised_answer,

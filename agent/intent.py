@@ -138,7 +138,25 @@ _FACT_TERMS: Final[tuple[str, ...]] = (
     "ranking",
     "how much",
 )
-_LIST_TERMS: Final[tuple[str, ...]] = ("list", "names", "examples", "top")
+_LIST_TERMS: Final[tuple[str, ...]] = (
+    "list",
+    "names",
+    "examples",
+    "top",
+    "prizes",  # plural of prize
+    "categories",
+    "places",
+    "levels",
+    "tiers",
+    "1st",
+    "2nd",
+    "3rd",
+    "1st place",
+    "2nd place",
+    "3rd place",
+)
+_PLURAL_INDICATORS: Final[tuple[str, ...]] = ("1st", "2nd", "3rd", "categories", "places", "levels", "tiers")
+_CONTEST_CONTEXT: Final[tuple[str, ...]] = ("contest", "competition", "challenge", "award", "tournament", "hackathon", "innovation", "dare to dream")
 _COMPARISON_TERMS: Final[tuple[str, ...]] = (
     " vs ",
     "compare",
@@ -314,11 +332,24 @@ def classify_answer_type(query: str) -> str:
     if q.startswith(("is ", "was ", "are ", "does ", "did ")):
         return ANSWER_FACT
 
-    if any(token in q for token in _FACT_TERMS):
-        return ANSWER_FACT
+    # If query has plural indicators (1st, 2nd, 3rd, categories, places), treat as LIST
+    if any(token in q for token in _PLURAL_INDICATORS):
+        # If also has prize/cost/prize terms, it's likely a list of prizes/costs
+        if any(token in q for token in {"prize", "cost", "price", "cash"}):
+            return ANSWER_LIST
+        if any(token in q for token in _LIST_TERMS):
+            return ANSWER_LIST
+
+    # Contest context: if query mentions prize + contest/competition/challenge, it's likely multiple prizes
+    if any(token in q for token in {"prize", "cost", "price", "cash"}):
+        if any(context in q for context in _CONTEST_CONTEXT):
+            return ANSWER_LIST
 
     if any(token in q for token in _LIST_TERMS):
         return ANSWER_LIST
+
+    if any(token in q for token in _FACT_TERMS):
+        return ANSWER_FACT
 
     if any(token in padded_q for token in _COMPARISON_TERMS):
         return ANSWER_COMPARISON

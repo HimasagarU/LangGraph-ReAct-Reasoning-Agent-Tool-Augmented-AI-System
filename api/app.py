@@ -354,6 +354,12 @@ def _run_agent_sync(
     }
 
 
+@app.get("/ping")
+async def ping() -> dict[str, str]:
+    """Ultra-lightweight ping endpoint for cron jobs. No dependencies checked."""
+    return {"status": "alive"}
+
+
 @app.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     return HealthResponse(
