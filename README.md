@@ -115,23 +115,15 @@ Example behaviors:
 - Explanation queries: good intuition, but depth can be uneven
 - Niche concepts: partial correctness with lower confidence
 
-## Windows Setup
+## Setup
 
-Open cmd.exe in the repository root and run:
+Copy the environment template and add your API keys:
 
-```cmd
-conda env create -f environment.yml
-conda activate langgraph-react-agent
-copy .env.example .env
+```bash
+cp .env.example .env
 ```
 
 Fill in `GROQ_API_KEY` and, if you want web search, `TAVILY_API_KEY`.
-
-If you already created the environment, update it with:
-
-```cmd
-conda env update -f environment.yml --prune
-```
 
 ## Reliability Guardrails
 
@@ -183,24 +175,24 @@ It demonstrates how LLMs can be orchestrated with tools, validation, and structu
 
 ## Run Locally
 
-### Command Prompt
+### With Python
 
-```cmd
-conda run -n langgraph-react-agent python -m uvicorn api.app:app --reload --host 0.0.0.0 --port 8000
+```bash
+python -m uvicorn api.app:app --reload --host 0.0.0.0 --port 8000
 ```
 
-### PowerShell
+### With Docker
 
-```powershell
-& .\run.ps1
+```bash
+docker build -t langgraph-react-agent .
+docker run --rm -p 8000:8000 --env-file .env langgraph-react-agent
 ```
 
 Then open http://127.0.0.1:8000/ in your browser.
 
-If you prefer activation first, make sure the prompt changes to include the env name before running `uvicorn`.
-
 ## Endpoints
 
+- `GET /ping` - simple keep-alive check (no dependencies).
 - `GET /health` - service and dependency status.
 - `GET /` - browser frontend.
 - `POST /agent/query` - structured agent response.
@@ -241,16 +233,10 @@ If you prefer activation first, make sure the prompt changes to include the env 
 
 ## Validation
 
-Run the smoke tests with:
+Run the unit tests with:
 
-```cmd
-conda run -n langgraph-react-agent python -m unittest discover -s tests
-```
-
-Or in PowerShell:
-
-```powershell
-& .\test.ps1
+```bash
+python -m unittest discover -s tests
 ```
 
 Then use the browser UI to validate the full flow:
@@ -265,11 +251,8 @@ Then use the browser UI to validate the full flow:
 
 If you see `ModuleNotFoundError: No module named 'langchain_core'`, you are running the base Anaconda Python instead of the project environment. Use either `conda run -n langgraph-react-agent ...` or open a shell where the prompt shows the `langgraph-react-agent` environment before starting Uvicorn.
 
-## Docker
+## Deployment
 
-Build and run the image with:
+For production deployment instructions, see [RENDER_DEPLOYMENT.md](RENDER_DEPLOYMENT.md).
 
-```cmd
-docker build -t langgraph-react-agent .
-docker run --rm -p 8000:8000 --env-file .env langgraph-react-agent
-```
+The system is optimized for Docker deployment on Render's free tier with automatic keep-alive via GitHub Actions.
