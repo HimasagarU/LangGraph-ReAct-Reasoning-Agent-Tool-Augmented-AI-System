@@ -18,6 +18,7 @@ from .intent import (
     ANSWER_EXPLANATION,
     ANSWER_FACT,
     ANSWER_LIST,
+    ANSWER_MULTI,
     INTENT_COMPARATIVE,
     INTENT_DISCOVERY,
     INTENT_SOTA,
@@ -66,15 +67,14 @@ Memory context: {memory_context}
 Response format:
 {response_template}
 """
-COMPARISON_TEMPLATE = """Verdict: [one-line recommendation or summary]
+COMPARISON_TEMPLATE = """**Verdict:** [one-line recommendation or summary]
 
-| Criterion | A | B |
+| Feature | A | B |
 |---|---|---|
-| [criterion 1] | [A] | [B] |
-| [criterion 2] | [A] | [B] |
-| [criterion 3] | [A] | [B] |
+| [Criterion 1] | [A] | [B] |
+| [Criterion 2] | [A] | [B] |
 
-Recommendation: [1-2 short sentences]
+**Recommendation:** [1-2 short sentences]
 
 Rules:
 - Verdict first.
@@ -82,18 +82,18 @@ Rules:
 - Include tradeoffs, not generic filler.
 """
 
-EXPLANATION_TEMPLATE = """TL;DR: [one-sentence answer]
+EXPLANATION_TEMPLATE = """**Summary:** [one-sentence answer]
 
-1. Intuition
+**1. Intuition**
 [1-2 short sentences]
 
-2. Breakdown
+**2. Breakdown**
 [2-4 short sentences or bullets]
 
-3. Example
+**3. Example**
 [one concrete example]
 
-4. Key takeaway
+**4. Takeaway**
 [one short sentence]
 
 Rules:
@@ -102,19 +102,17 @@ Rules:
 - Answer first, explain second.
 """
 
-FACT_TEMPLATE = """Value: [direct answer in one short sentence]
-Unit: n/a
-Source: [1-2 credible sources]
-Confidence: High / Medium / Low
+FACT_TEMPLATE = """**Answer:** [direct single-line answer]
+
+**Sources:** [1-2 credible sources]
 
 Rules:
-- Put the direct answer in Value.
-- If the premise is wrong, say that in Value.
-- Keep it tight.
-- Do not add extra sections.
+- Put the direct answer first.
+- If the premise is wrong, state that clearly.
+- Keep it tight. Do not add extra sections.
 """
 
-LIST_TEMPLATE = """Answer:
+LIST_TEMPLATE = """**Answer:**
 - [item 1]
 - [item 2]
 - [item 3]
@@ -122,12 +120,11 @@ LIST_TEMPLATE = """Answer:
 Rules:
 - Keep items short.
 - Order from most relevant to least relevant.
-- No long paragraphs.
 """
 
-CALC_TEMPLATE = """Result: [final numeric answer]
+CALC_TEMPLATE = """**Result:** [final numeric answer]
 
-Check: [very short verification]
+**Steps:** [very short verification]
 
 Rules:
 - Show the result first.
@@ -142,6 +139,18 @@ Rules:
 - Do not answer yet.
 - No extra explanation.
 """
+
+MULTI_TEMPLATE = """### Explanation
+[Your explanation following the rules]
+
+### Calculation
+[Your calculation result]
+
+Rules:
+- Keep distinct sections separated by their headers.
+- Answer clearly and concisely.
+"""
+
 _URL_PATTERN = re.compile(r"https?://[^\s)]+")
 _MONTH_PATTERN = re.compile(
     r"\b(january|february|march|april|may|june|july|august|september|october|november|december)\b",
@@ -211,6 +220,10 @@ def _build_forced_tool_instruction(answer_type: str, tool_calls_made: list[str])
     if answer_type == ANSWER_CALCULATION:
         return ""
 
+    if answer_type == ANSWER_FACT:
+        if not search_tools_used:
+            return "You must use tavily_search or wikipedia_lookup to verify this fact."
+
     if answer_type == ANSWER_AMBIGUOUS:
         return "Ask one clarification question only. Do not search."
 
@@ -236,6 +249,9 @@ def _build_plan(intent: str, answer_type: str, query: str) -> list[str]:
     if "how" in query.lower() and answer_type == ANSWER_EXPLANATION:
         return ["search for grounding evidence", "explain the concept", "return a learning-style answer"]
 
+    if answer_type == ANSWER_MULTI:
+        return ["decompose task", "resolve explanation", "resolve calculation", "merge results"]
+    
     return ["gather evidence", "answer clearly"]
 
 
@@ -249,12 +265,14 @@ def _build_planner_node(model_name: str):
             intent = route_res["intent"]
             answer_type = route_res["answer_type"]
             route_source = route_res["route_source"]
-            classifier_confidence = route_res["confidence"]
+            classifier_confidence = route_res.get("confidence", 0.0)
+            subtasks = route_res.get("subtasks", [])
         else:
             intent = str(state.get("intent", INTENT_DISCOVERY))
             answer_type = _resolve_answer_type(state)
             route_source = str(state.get("route_source", "unknown"))
             classifier_confidence = float(state.get("classifier_confidence", 0.0))
+            subtasks = list(state.get("subtasks", []))
 
         plan = _build_plan(intent, answer_type, query)
         memory_context = format_memory_context(query, limit=2)
@@ -262,6 +280,7 @@ def _build_planner_node(model_name: str):
         return {
             "intent": intent,
             "answer_type": answer_type,
+            "subtasks": subtasks,
             "route_source": route_source,
             "classifier_confidence": classifier_confidence,
             "classifier_label": intent if route_source == "classifier" else "",
@@ -289,6 +308,9 @@ def _build_response_template(intent: str, depth_mode: str, answer_type: str) -> 
     if answer_type == ANSWER_AMBIGUOUS:
         return AMBIGUOUS_TEMPLATE
 
+    if answer_type == ANSWER_MULTI:
+        return MULTI_TEMPLATE
+
     if answer_type == ANSWER_COMPARISON or intent == INTENT_COMPARATIVE:
         return COMPARISON_TEMPLATE
     if depth_mode == "concise":
@@ -298,7 +320,7 @@ def _build_response_template(intent: str, depth_mode: str, answer_type: str) -> 
 
 
 def _extract_user_query(messages: list[Any]) -> str:
-    for message in messages:
+    for message in reversed(messages):
         if isinstance(message, HumanMessage):
             content = str(message.content or "").strip()
             if content:
@@ -419,6 +441,7 @@ def _resolve_answer_type(state: AgentState) -> str:
         ANSWER_COMPARISON,
         ANSWER_CALCULATION,
         ANSWER_AMBIGUOUS,
+        ANSWER_MULTI,
     }
     if answer_type in valid:
         return answer_type
@@ -477,21 +500,28 @@ def _answer_quality_issues(
     elif answer_type == ANSWER_FACT:
         if not answer.strip():
             issues.append("empty answer")
+        if "not specified" in normalized_answer:
+            issues.append("likely missing retrieval")
     elif answer_type == ANSWER_LIST:
         if not re.search(r"(?m)^(?:[-*]\s+|\d+\.)", answer):
             issues.append("missing bullet list")
     elif answer_type == ANSWER_CALCULATION:
-        if not re.search(r"(?im)^result:\s*", answer) and not re.search(r"\d", answer):
+        if not re.search(r"(?im)^\*\*result:\*\*\s*", answer) and not re.search(r"\d", answer):
             issues.append("missing numeric result")
     elif answer_type == ANSWER_AMBIGUOUS:
         stripped = answer.strip()
         if not stripped.endswith("?") or stripped.count("?") != 1:
             issues.append("must ask exactly one clarification question")
-        if re.search(r"(?im)^(?:value|source|confidence|result):", answer):
+        if re.search(r"(?im)^\*\*(?:answer|sources|result):\*\*", answer):
             issues.append("should not answer before clarification")
+
+    elif answer_type == ANSWER_MULTI:
+        if "### Explanation" not in answer and "### Calculation" not in answer:
+            issues.append("missing multi-part headers")
+
     else:
-        if not re.search(r"(?im)^tl;dr:\s*", answer):
-            issues.append("missing TL;DR")
+        if not re.search(r"(?im)^\*\*summary:\*\*\s*", answer):
+            issues.append("missing Summary")
         if len(answer.strip()) < 40:
             issues.append("answer too short")
         if depth_mode == "learning_ml":
@@ -503,19 +533,19 @@ def _answer_quality_issues(
 
 def _safe_fallback_answer(answer_type: str) -> str:
     if answer_type == ANSWER_FACT:
-        return "Value: Information not found from the available sources.\nUnit: n/a\nSource: Tool results\nConfidence: Medium"
+        return "**Answer:** Information not found from the available sources.\n\n**Sources:** Tool results"
     if answer_type == ANSWER_COMPARISON:
         return (
-            "Verdict: Unable to verify a reliable comparison from available sources.\n\n"
-            "Recommendation: Review more authoritative sources and retry."
+            "**Verdict:** Unable to verify a reliable comparison from available sources.\n\n"
+            "**Recommendation:** Review more authoritative sources and retry."
         )
     if answer_type == ANSWER_LIST:
-        return "Answer:\n- Information not found from the available sources."
+        return "**Answer:**\n- Information not found from the available sources."
     if answer_type == ANSWER_CALCULATION:
-        return "Result: Calculation could not be verified.\nCheck: Unable to validate with available evidence."
+        return "**Result:** Calculation could not be verified.\n\n**Steps:** Unable to validate with available evidence."
     if answer_type == ANSWER_AMBIGUOUS:
         return "Clarify one thing: Could you clarify what you mean?"
-    return "I could not produce a reliable answer from the available sources."
+    return "**TL;DR:** I could not produce a reliable answer from the available sources."
 
 
 def _build_agent_node(model_name: str, temperature: float):
@@ -578,6 +608,48 @@ def _build_agent_node(model_name: str, temperature: float):
                 }
         model = _load_model(model_name, effective_temperature, os.getenv("GROQ_API_KEY", ""))
         model_with_tools = model.bind_tools(tools)
+        
+        if answer_type == "multi":
+            parts = []
+            subtasks = state.get("subtasks", [])
+            
+            if "explanation" in subtasks:
+                sys_expl = _build_system_message_for_depth("explanation", depth_mode, ANSWER_EXPLANATION, rewritten_query, _plan_text(plan), current_step, memory_context)
+                if forced_instruction:
+                    sys_expl = SystemMessage(content=f"{sys_expl.content}\n\n{forced_instruction}")
+                isolate_msg = HumanMessage(content="CRITICAL INSTRUCTION: You are executing the 'explanation' portion of a multi-part query. ONLY explain the concept. Do NOT perform the calculation or answer other parts.")
+                resp_expl = model_with_tools.invoke([sys_expl, *history, isolate_msg])
+                parts.append(f"### Explanation\n{str(resp_expl.content or '').strip()}")
+                
+            if "calculation" in subtasks:
+                calc_ans = _maybe_answer_calculation(user_query)
+                if calc_ans:
+                    parts.append(f"### Calculation\n{calc_ans}")
+                else:
+                    sys_calc = _build_system_message_for_depth("calculation", depth_mode, ANSWER_CALCULATION, rewritten_query, _plan_text(plan), current_step, memory_context)
+                    isolate_msg = HumanMessage(content="CRITICAL INSTRUCTION: You are executing the 'calculation' portion of a multi-part query. ONLY perform the calculation. Do NOT explain other concepts.")
+                    resp_calc = model_with_tools.invoke([sys_calc, *history, isolate_msg])
+                    parts.append(f"### Calculation\n{str(resp_calc.content or '').strip()}")
+            
+            final_answer = "\n\n".join(parts)
+            return {
+                "messages": [AIMessage(content=final_answer)],
+                "final_answer": final_answer,
+                "final_answer_reviewed": False,
+                "depth_mode": depth_mode,
+                "answer_type": answer_type,
+                "plan": plan,
+                "plan_index": min(plan_index + 1, len(plan)),
+                "rewritten_query": rewritten_query,
+                "memory_context": memory_context,
+                "confidence": confidence,
+                "needs_retry": False,
+                "validation_errors": [],
+                "answer_format_ok": False,
+                "iteration_count": int(state.get("iteration_count", 0)) + 1,
+                "metrics": {"plan_length": len(plan), "steps": int(state.get("iteration_count", 0)) + 1},
+            }
+
         system_message = _build_system_message_for_depth(
             intent,
             depth_mode,
@@ -647,12 +719,14 @@ def _build_review_node(model_name: str, temperature: float):
             list(state.get("tool_calls_made", [])),
         )
 
-        if answer_type in {ANSWER_AMBIGUOUS, ANSWER_CALCULATION}:
+        if answer_type in {ANSWER_AMBIGUOUS, ANSWER_CALCULATION, ANSWER_MULTI}:
             return {
+                "messages": [AIMessage(content=draft_answer)],
                 "final_answer": draft_answer,
                 "final_answer_reviewed": True,
                 "depth_mode": depth_mode,
                 "validation_errors": issues,
+                "answer_format_ok": not issues,
             }
 
         effective_temperature = _resolve_model_temperature(answer_type)
