@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>LangGraph ReAct Agent</title>
-  <meta name="description" content="Intent-aware ReAct agent with query, stream, health, and trace visualization." />
+  <meta name="description" content="A simple demo of routing, tools, and reasoning steps." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
@@ -12,163 +12,64 @@
   <script defer src="/static/app.js"></script>
 </head>
 <body>
-  <div class="background-orb orb-one"></div>
-  <div class="background-orb orb-two"></div>
-  <div class="background-grid"></div>
-
   <div class="page-shell">
-    <header class="hero panel">
-      <div class="hero-copy">
-        <div class="eyebrow">LangGraph ReAct Agent</div>
-        <h1>An AI agent that plans, searches, calculates, and shows its steps.</h1>
-        <p class="hero-text">
-          Ask a question, get an answer, and check the service from one page.
-        </p>
-        <div class="hero-actions">
-          <button class="button button-primary" id="refresh-health-btn" type="button">Check health</button>
-          <button class="button button-secondary" id="load-example-btn" type="button">Example</button>
-        </div>
-        <div class="stats-row">
-          <div class="stat-card">
-            <span class="stat-label">Model</span>
-            <span class="stat-value" id="current-model">llama-3.3-70b-versatile</span>
-          </div>
-          <div class="stat-card">
-            <span class="stat-label">Limit</span>
-            <span class="stat-value" id="current-limit-label">Configurable steps</span>
-          </div>
-          <div class="stat-card">
-            <span class="stat-label">API</span>
-            <span class="stat-value">health · query · stream</span>
-          </div>
-        </div>
+    <header class="top-bar">
+      <div class="top-bar-content">
+        <h1 class="top-title">LangGraph Agent</h1>
+        <p class="top-subtitle">Ask a question. Get an answer. Inspect the trace.</p>
       </div>
-      <aside class="status-panel">
-        <div class="status-header">
-          <span class="status-dot" id="health-dot"></span>
-          <div>
-            <div class="status-label">Status</div>
-            <div class="status-value" id="health-status">Checking...</div>
-          </div>
-        </div>
-        <div class="mini-grid">
-          <div class="mini-card">
-            <span>Groq</span>
-            <strong id="groq-status">Unknown</strong>
-          </div>
-          <div class="mini-card">
-            <span>Tavily</span>
-            <strong id="tavily-status">Unknown</strong>
-          </div>
-          <div class="mini-card">
-            <span>Tools</span>
-            <strong id="tools-count">3</strong>
-          </div>
-          <div class="mini-card">
-            <span>Mode</span>
-            <strong>ReAct</strong>
-          </div>
-        </div>
-        <div class="endpoint-list">
-          <div class="endpoint-item"><code>GET /health</code><span>Health</span></div>
-          <div class="endpoint-item"><code>POST /agent/query</code><span>Answer</span></div>
-          <div class="endpoint-item"><code>POST /agent/stream</code><span>Stream</span></div>
-        </div>
-      </aside>
+      <nav class="top-nav">
+        <button id="nav-home-btn" class="nav-btn active">Home</button>
+        <button id="nav-about-btn" class="nav-btn">About</button>
+      </nav>
     </header>
 
-    <main class="content-grid">
+    <main class="content-grid" id="view-home">
       <section class="panel composer-panel">
-        <div class="section-header">
-          <div>
-            <div class="eyebrow">Try it</div>
-            <h2>Ask a question</h2>
-          </div>
-          <div class="endpoint-pill">Local API</div>
-        </div>
-
         <form id="query-form" class="composer-form">
           <label class="field-group">
-            <span>Query</span>
             <textarea id="query-input" rows="5" placeholder="What is RAG in AI?"></textarea>
           </label>
 
           <div class="example-row" id="example-row">
-            <button class="example-chip" type="button" data-query="What is the cash prize of the Turing Award?">Fact</button>
-            <button class="example-chip" type="button" data-query="Compare RAG vs fine-tuning">Compare</button>
-            <button class="example-chip" type="button" data-query="Calculate 18 * (27 + 5)">Math</button>
-            <button class="example-chip" type="button" data-query="What is RAG in AI?">Explain</button>
-            <button class="example-chip" type="button" data-query="apple">Ambiguous</button>
+            <button class="example-chip" type="button" data-query="What is the cash prize of the Turing Award?">Fact question</button>
+            <button class="example-chip" type="button" data-query="Compare RAG vs fine-tuning">Comparison question</button>
+            <button class="example-chip" type="button" data-query="Calculate 18 * (27 + 5)">Math question</button>
+            <button class="example-chip" type="button" data-query="What is RAG in AI?">Explanation question</button>
+            <button class="example-chip" type="button" data-query="apple">Ambiguous input</button>
           </div>
 
-          <div class="control-grid">
-            <label class="field-group range-group">
-              <span>Max iterations</span>
-              <div class="range-line">
-                <input id="max-iterations" type="range" min="1" max="10" value="5" />
-                <output id="max-iterations-value">5</output>
-              </div>
-            </label>
+          <div class="action-row">
+            <button class="button button-primary" id="query-btn" type="submit">Get answer</button>
+            <button class="button button-accent" id="stream-btn" type="button">Stream answer</button>
+            <button class="button button-secondary" id="clear-btn" type="button">Clear</button>
+          </div>
 
-            <label class="field-group">
-              <span>Model override</span>
-              <input id="model-input" type="text" placeholder="llama-3.3-70b-versatile" />
+          <div class="composer-settings">
+            <label class="inline-setting">
+              Max iterations: 
+              <input id="max-iterations" type="range" min="1" max="10" value="5" />
+              <output id="max-iterations-value">5</output>
             </label>
-
-            <label class="field-group">
-              <span>Depth</span>
+            <label class="inline-setting">
+              Depth:
               <select id="depth-mode">
                 <option value="learning_ml" selected>Learning ML</option>
                 <option value="standard">Standard</option>
                 <option value="concise">Concise</option>
               </select>
             </label>
-          </div>
-
-          <div class="action-row">
-            <button class="button button-primary" id="query-btn" type="submit">Run</button>
-            <button class="button button-accent" id="stream-btn" type="button">Stream</button>
-            <button class="button button-secondary" id="clear-btn" type="button">Clear</button>
+            <label class="inline-setting">
+              Model:
+              <input id="model-input" type="text" placeholder="llama-3.3-70b-versatile" />
+            </label>
           </div>
         </form>
       </section>
 
-      <section class="panel insight-panel">
-        <div class="section-header">
-          <div>
-            <div class="eyebrow">Routing</div>
-            <h2>How it works</h2>
-          </div>
-        </div>
-        <div class="intent-list">
-          <article class="intent-card intent-explanatory">
-            <strong>Explanatory</strong>
-            <span>Definitions and explanations.</span>
-          </article>
-          <article class="intent-card intent-sota">
-            <strong>SOTA</strong>
-            <span>Latest info and updates.</span>
-          </article>
-          <article class="intent-card intent-comparative">
-            <strong>Compare</strong>
-            <span>Side-by-side comparisons.</span>
-          </article>
-          <article class="intent-card intent-technical">
-            <strong>Technical</strong>
-            <span>Math and formulas.</span>
-          </article>
-        </div>
-        <div class="note-box">
-          The backend routes by query type, builds a short execution plan, validates the format, and uses configurable iteration limits.
-        </div>
-      </section>
-
       <section class="panel result-panel wide-panel">
         <div class="section-header">
-          <div>
-            <div class="eyebrow">Answer</div>
-            <h2>Result details</h2>
-          </div>
+          <h2>Result</h2>
           <div class="meta-row" id="result-meta">
             <span class="meta-chip">No result</span>
           </div>
@@ -178,9 +79,11 @@
           <div class="answer-placeholder">Run a question to see the answer.</div>
         </div>
 
-        <div class="validation-card" id="validation-card">
-          <div class="card-title">Validation</div>
-          <div class="empty-state">Validation feedback appears when the backend flags formatting issues.</div>
+        <div class="trace-card">
+          <div class="card-title">Steps</div>
+          <div class="trace-list" id="trace-list">
+            <div class="empty-state">Steps show up here after a request.</div>
+          </div>
         </div>
 
         <div class="sources-card" id="sources-card">
@@ -190,35 +93,77 @@
           </div>
         </div>
 
-        <div class="trace-layout">
-          <div class="trace-card">
-            <div class="card-title">Steps</div>
-            <div class="trace-list" id="trace-list">
-              <div class="empty-state">Steps show up here after a request.</div>
-            </div>
+        <div class="debug-toggle-bar">
+          <button id="toggle-debug-btn" class="button button-ghost" type="button">Show Developer View</button>
+        </div>
+
+        <div id="debug-section" class="debug-section" style="display: none;">
+          <div class="validation-card" id="validation-card">
+            <div class="card-title">Validation</div>
+            <div class="empty-state">Validation feedback appears when the backend flags formatting issues.</div>
           </div>
           <div class="trace-card stream-card">
             <div class="card-title">Stream</div>
             <pre class="stream-output" id="stream-output">Waiting for stream...</pre>
           </div>
+          <div class="diagnostics-grid">
+            <div class="diagnostic-card">
+              <div class="card-title">Health</div>
+              <pre id="health-json" class="json-output">Checking health...</pre>
+            </div>
+            <div class="diagnostic-card">
+              <div class="card-title">Raw data</div>
+              <pre id="raw-json" class="json-output">No data yet.</pre>
+            </div>
+          </div>
         </div>
       </section>
+    </main>
 
-      <section class="panel wide-panel">
+    <main class="content-grid" id="view-about" style="display: none;">
+      <section class="panel about-panel wide-panel">
         <div class="section-header">
-          <div>
-            <div class="eyebrow">Debug</div>
-            <h2>Health and data</h2>
-          </div>
+          <h2>About</h2>
         </div>
-        <div class="diagnostics-grid">
-          <div class="diagnostic-card">
-            <div class="card-title">Health</div>
-            <pre id="health-json" class="json-output">Checking health...</pre>
+        
+        <div class="about-content">
+          <h3>What this project does</h3>
+          <p>This is a demonstration of an agentic reasoning architecture built using LangGraph. It showcases intent routing, tool selection, graph execution, and transparent trace visibility.</p>
+          
+          <h3>How routing works</h3>
+          <p>Queries are evaluated by an ML Intent Classifier and fallback regex rules to route into specific paths. The system builds a short execution plan and restricts formats to prevent unnecessary verbosity.</p>
+          <div class="intent-list">
+            <article class="intent-card intent-explanatory">
+              <strong>Explanatory</strong>
+              <span>Definitions and explanations.</span>
+            </article>
+            <article class="intent-card intent-sota">
+              <strong>SOTA</strong>
+              <span>Latest info and updates.</span>
+            </article>
+            <article class="intent-card intent-comparative">
+              <strong>Compare</strong>
+              <span>Side-by-side comparisons.</span>
+            </article>
+            <article class="intent-card intent-technical">
+              <strong>Technical</strong>
+              <span>Math and formulas.</span>
+            </article>
           </div>
-          <div class="diagnostic-card">
-            <div class="card-title">Raw data</div>
-            <pre id="raw-json" class="json-output">No data yet.</pre>
+
+          <h3>Tech Stack</h3>
+          <ul>
+            <li><strong>Agent Framework:</strong> LangGraph (Python)</li>
+            <li><strong>LLM Inference:</strong> Groq (Llama-3.3-70b-versatile)</li>
+            <li><strong>Search:</strong> Tavily API & Wikipedia API</li>
+            <li><strong>Frontend:</strong> Vanilla JS + HTML + CSS</li>
+          </ul>
+
+          <h3>Endpoints</h3>
+          <div class="endpoint-list">
+            <div class="endpoint-item"><code>GET /health</code><span>Health status</span></div>
+            <div class="endpoint-item"><code>POST /agent/query</code><span>Synchronous answer</span></div>
+            <div class="endpoint-item"><code>POST /agent/stream</code><span>SSE event stream</span></div>
           </div>
         </div>
       </section>
@@ -226,6 +171,19 @@
 
     <footer class="footer-note">
       Built for the LangGraph ReAct Agent backend.
+      
+      <!-- Hidden legacy elements for JS compat -->
+      <div style="display: none;">
+        <button id="refresh-health-btn"></button>
+        <button id="load-example-btn"></button>
+        <span id="current-model"></span>
+        <span id="current-limit-label"></span>
+        <span id="health-dot"></span>
+        <span id="health-status"></span>
+        <strong id="groq-status"></strong>
+        <strong id="tavily-status"></strong>
+        <strong id="tools-count"></strong>
+      </div>
     </footer>
   </div>
 </body>

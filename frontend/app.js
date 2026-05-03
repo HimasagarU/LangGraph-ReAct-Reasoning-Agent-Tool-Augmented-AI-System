@@ -1,6 +1,8 @@
 const state = {
   currentResult: null,
   currentAbortController: null,
+  currentView: 'home',
+  debugVisible: false,
 };
 
 const elements = {
@@ -31,6 +33,12 @@ const elements = {
   rawJson: document.getElementById('raw-json'),
   resultMeta: document.getElementById('result-meta'),
   exampleButtons: document.querySelectorAll('.example-chip'),
+  navHomeBtn: document.getElementById('nav-home-btn'),
+  navAboutBtn: document.getElementById('nav-about-btn'),
+  viewHome: document.getElementById('view-home'),
+  viewAbout: document.getElementById('view-about'),
+  toggleDebugBtn: document.getElementById('toggle-debug-btn'),
+  debugSection: document.getElementById('debug-section'),
 };
 
 const SAMPLE_QUERY = 'What is RAG in AI?';
@@ -646,10 +654,32 @@ function wireEvents() {
       setExampleQuery(query);
     });
   });
+
+  elements.navHomeBtn?.addEventListener('click', () => {
+    state.currentView = 'home';
+    elements.navHomeBtn.classList.add('active');
+    elements.navAboutBtn.classList.remove('active');
+    elements.viewHome.style.display = '';
+    elements.viewAbout.style.display = 'none';
+  });
+
+  elements.navAboutBtn?.addEventListener('click', () => {
+    state.currentView = 'about';
+    elements.navAboutBtn.classList.add('active');
+    elements.navHomeBtn.classList.remove('active');
+    elements.viewAbout.style.display = '';
+    elements.viewHome.style.display = 'none';
+  });
+
+  elements.toggleDebugBtn?.addEventListener('click', () => {
+    state.debugVisible = !state.debugVisible;
+    elements.debugSection.style.display = state.debugVisible ? '' : 'none';
+    elements.toggleDebugBtn.textContent = state.debugVisible ? 'Hide Developer View' : 'Show Developer View';
+  });
 }
 
 function initialize() {
-  elements.queryInput.value = SAMPLE_QUERY;
+  elements.queryInput.value = '';
   elements.modelInput.value = '';
   elements.depthMode.value = 'learning_ml';
   elements.maxIterationsValue.textContent = elements.maxIterations.value;
@@ -657,6 +687,7 @@ function initialize() {
   wireEvents();
   refreshHealth();
   clearOutput();
+  elements.queryInput.focus();
 }
 
 initialize();
