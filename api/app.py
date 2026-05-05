@@ -420,7 +420,7 @@ async def on_startup():
 async def health() -> HealthResponse:
     return HealthResponse(
         status="ok",
-        tools=["tavily_search", "wikipedia_lookup", "calculator"],
+        tools=["tavily_search", "wikipedia_lookup", "calculator", "page_fetch"],
         model=_resolve_model_name(),
         dependencies={
             "groq_api_key": bool(os.getenv("GROQ_API_KEY")),

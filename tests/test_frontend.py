@@ -58,6 +58,7 @@ class FrontendSmokeTests(unittest.TestCase):
         payload = response.json()
         self.assertEqual(payload["status"], "ok")
         self.assertIn("tavily_search", payload["tools"])
+        self.assertIn("page_fetch", payload["tools"])
 
     def test_query_endpoint_returns_structured_response(self) -> None:
         with patch("api.app._run_agent_sync", return_value=FAKE_RESULT):

@@ -33,6 +33,10 @@ _WIKIPEDIA_HEADERS = {
     "Accept": "application/json",
 }
 
+_PAGE_FETCH_HEADERS = {
+    "User-Agent": "LangGraphReActAgent/1.0 (https://github.com/himas/langgraph-react-agent)",
+}
+
 def _handle_tool_error(tool_name: str, exc: Exception) -> str:
     """Centralized tool error handling."""
     error_msg = str(exc)
@@ -53,6 +57,43 @@ def _clean_text(text: str, limit: int) -> str:
     if len(cleaned) <= limit:
         return cleaned
     return cleaned[: limit - 3].rstrip() + "..."
+
+
+def _extract_page_title(html: str) -> str:
+    """Extract title from HTML using simple regex."""
+    import re
+    match = re.search(r"<title[^>]*>([^<]+)</title>", html, re.IGNORECASE)
+    if match:
+        title = match.group(1).strip()
+        return title[:120]
+    return "Page content"
+
+
+def _extract_main_text(html: str) -> str:
+    """Extract main readable text from HTML by removing script/style tags and markup."""
+    import re
+    if not html:
+        return ""
+    
+    # Remove script and style tags
+    text = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.IGNORECASE | re.DOTALL)
+    
+    # Remove HTML tags but keep content
+    text = re.sub(r"<[^>]+>", " ", text)
+    
+    # Decode common HTML entities
+    text = text.replace("&nbsp;", " ")
+    text = text.replace("&lt;", "<")
+    text = text.replace("&gt;", ">")
+    text = text.replace("&amp;", "&")
+    text = text.replace("&quot;", '"')
+    text = text.replace("&#39;", "'")
+    
+    # Collapse whitespace
+    text = " ".join(text.split())
+    
+    return text
 
 
 def score_source_quality(url: str, snippet: str = "", title: str = "") -> int:
@@ -245,5 +286,59 @@ def calculator(expression: str) -> str:
         return _format_calc_error(f"Error: {exc}")
 
 
+@tool("page_fetch")
+def page_fetch(url: str) -> str:
+    """Fetch and parse the main content from a web page given its URL."""
+    if not url:
+        return json.dumps({"results": [], "error": "URL is required."})
+
+    if not url.startswith(("http://", "https://")):
+        url = f"https://{url}"
+
+    try:
+        response = requests.get(
+            url,
+            headers=_PAGE_FETCH_HEADERS,
+            timeout=8,
+            allow_redirects=True,
+            stream=False,
+        )
+        response.raise_for_status()
+    except requests.exceptions.Timeout:
+        return json.dumps({"results": [], "error": "Request timed out."})
+    except requests.exceptions.RequestException as exc:
+        return json.dumps({"results": [], "error": f"Failed to fetch URL: {str(exc)}"})
+
+    try:
+        html = response.text
+        if not html or len(html) < 100:
+            return json.dumps({"results": [], "error": "Page returned no content or was too short."})
+
+        title = _extract_page_title(html)
+        content = _extract_main_text(html)
+
+        if not content or len(content) < 50:
+            return json.dumps({"results": [], "error": "Could not extract meaningful content from page."})
+
+        snippet = _clean_text(content, 420)
+        quality_score = score_source_quality(url, snippet=snippet, title=title)
+
+        return json.dumps(
+            {
+                "results": [
+                    {
+                        "title": title,
+                        "url": url,
+                        "snippet": snippet,
+                        "score": quality_score,
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+    except Exception as exc:
+        return json.dumps({"results": [], "error": _handle_tool_error("Page fetch", exc)})
+
+
 def build_tools() -> list[BaseTool]:
-    return [tavily_search, wikipedia_lookup, calculator]
+    return [tavily_search, wikipedia_lookup, calculator, page_fetch]

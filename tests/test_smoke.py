@@ -26,6 +26,14 @@ class IntentSmokeTests(unittest.TestCase):
     def test_preferred_tool_order(self) -> None:
         self.assertEqual(preferred_tools_for_intent("technical")[0], "calculator")
 
+    def test_page_fetch_in_preferred_tools(self) -> None:
+        """Verify page_fetch is preferred for explanation, comparison, and discovery."""
+        self.assertIn("page_fetch", preferred_tools_for_intent("explanatory"))
+        self.assertIn("page_fetch", preferred_tools_for_intent("comparative"))
+        self.assertIn("page_fetch", preferred_tools_for_intent("discovery"))
+        # page_fetch is available in technical but not the first choice (calculator is)
+        self.assertEqual(preferred_tools_for_intent("technical")[0], "calculator")
+
     def test_short_question_mark_query_does_not_auto_become_explanatory(self) -> None:
         self.assertEqual(classify_query_intent("Prize?"), INTENT_DISCOVERY)
 

@@ -119,11 +119,11 @@ _INTENT_RULES = [
 ]
 
 INTENT_TOOL_ORDER: dict[str, tuple[str, ...]] = {
-    INTENT_EXPLANATORY: ("wikipedia_lookup", "tavily_search"),
-    INTENT_SOTA: ("tavily_search", "wikipedia_lookup"),
-    INTENT_TECHNICAL: ("calculator", "tavily_search"),
-    INTENT_COMPARATIVE: ("tavily_search", "wikipedia_lookup", "calculator"),
-    INTENT_DISCOVERY: ("tavily_search", "wikipedia_lookup"),
+    INTENT_EXPLANATORY: ("page_fetch", "wikipedia_lookup", "tavily_search"),
+    INTENT_SOTA: ("tavily_search", "page_fetch", "wikipedia_lookup"),
+    INTENT_TECHNICAL: ("calculator", "tavily_search", "page_fetch"),
+    INTENT_COMPARATIVE: ("tavily_search", "page_fetch", "wikipedia_lookup", "calculator"),
+    INTENT_DISCOVERY: ("tavily_search", "page_fetch", "wikipedia_lookup"),
 }
 
 _FACT_TERMS: Final[tuple[str, ...]] = (

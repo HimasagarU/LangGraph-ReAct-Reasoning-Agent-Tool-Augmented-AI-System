@@ -221,17 +221,22 @@ def _build_system_message(
 
 def _build_forced_tool_instruction(answer_type: str, tool_calls_made: list[str]) -> str:
     used_tools = {tool_name.lower() for tool_name in tool_calls_made}
-    search_tools_used = any(tool in used_tools for tool in {"tavily_search", "wikipedia_lookup"})
+    search_tools_used = any(tool in used_tools for tool in {"tavily_search", "wikipedia_lookup", "page_fetch"})
 
     if answer_type == ANSWER_CALCULATION:
-        return ""
+        return "Answer directly with the numeric result only."
 
-    if answer_type == ANSWER_FACT:
-        if not search_tools_used:
-            return "You must use tavily_search or wikipedia_lookup to verify this fact."
+    if answer_type == ANSWER_FACT and not search_tools_used:
+        return "You must use tavily_search, wikipedia_lookup, or page_fetch to verify this fact."
+
+    if answer_type == ANSWER_COMPARISON:
+        return (
+            "You must return a verdict first, then a markdown table with 3-4 criteria, "
+            "then a short recommendation. Include explicit tradeoffs."
+        )
 
     if answer_type == ANSWER_AMBIGUOUS:
-        return "Ask one clarification question only. Do not search."
+        return "Ask exactly one clarification question. Do not answer yet. Do not use tools."
 
     return ""
 
@@ -520,7 +525,7 @@ def _answer_quality_issues(
     normalized_answer = answer.lower()
     issues: list[str] = []
     used_tools = {tool_name.lower() for tool_name in (tool_calls_made or [])}
-    search_tools_used = any(tool in used_tools for tool in {"tavily_search", "wikipedia_lookup"})
+    search_tools_used = any(tool in used_tools for tool in {"tavily_search", "wikipedia_lookup", "page_fetch"})
 
     def has_table() -> bool:
         return any("|" in line for line in answer.splitlines())
