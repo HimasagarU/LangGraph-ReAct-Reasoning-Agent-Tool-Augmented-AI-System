@@ -407,11 +407,12 @@ function renderHealth(payload) {
 }
 
 function getPayload() {
+  const budgetValue = elements.depthMode.value;
   return {
     query: elements.queryInput.value.trim(),
     max_iterations: Number(elements.maxIterations.value),
     model_name: elements.modelInput.value.trim() || null,
-    depth_mode: elements.depthMode.value,
+    reasoning_budget: budgetValue || null,
   };
 }
 
@@ -460,7 +461,7 @@ function setExampleQuery(query) {
 
 function setDefaultSample() {
   setExampleQuery(SAMPLE_QUERY);
-  elements.depthMode.value = 'learning_ml';
+  elements.depthMode.value = '';
 }
 
 function clearOutput() {
@@ -681,7 +682,7 @@ function wireEvents() {
 function initialize() {
   elements.queryInput.value = '';
   elements.modelInput.value = '';
-  elements.depthMode.value = 'learning_ml';
+  elements.depthMode.value = '';
   elements.maxIterationsValue.textContent = elements.maxIterations.value;
   elements.currentLimitLabel.textContent = `${elements.maxIterations.value} configurable steps`;
   wireEvents();

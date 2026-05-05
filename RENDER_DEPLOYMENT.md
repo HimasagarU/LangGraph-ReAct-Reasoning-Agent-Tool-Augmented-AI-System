@@ -22,6 +22,7 @@
    MODEL_NAME=llama-3.3-70b-versatile
    MAX_ITERATIONS=5
    MODEL_TEMPERATURE=0.2
+   RENDER_EXTERNAL_URL=https://your-render-url.onrender.com
    ```
 
 ### 4. **Deploy**
@@ -34,24 +35,35 @@
 
 Render's free tier spins down services after **15 minutes** of inactivity. To keep your server alive:
 
-### **Option A: GitHub Actions (Recommended)**
+### **Option A: Internal Keep-Alive (Easiest & Most Reliable)**
+
+The application now includes a built-in background task that pings itself every 10 minutes.
 
 1. **Get your Render URL:**
    - After deployment, copy your URL (e.g., `https://langgraph-react-agent.onrender.com`)
 
-2. **Add GitHub Secret:**
+2. **Add Environment Variable on Render:**
+   - Go to Render Dashboard → Your Service → Environment
+   - Add a new variable:
+     - **Key:** `RENDER_EXTERNAL_URL`
+     - **Value:** `https://your-render-url.onrender.com`
+   - Click **Save Changes**. The server will restart and begin self-pinging.
+
+### **Option B: GitHub Actions (Redundant Backup)**
+
+1. **Add GitHub Secret:**
    - Go to your GitHub repo → Settings → Secrets and variables → Actions
    - Click "New repository secret"
    - Name: `RENDER_URL`
    - Value: `https://your-render-url.onrender.com`
 
-3. **Activate Workflow:**
+2. **Activate Workflow:**
    - The `.github/workflows/keep-alive.yml` will automatically:
-     - Run every 13 minutes
+     - Run every 10 minutes
      - Send a ping to `/ping` endpoint
-     - Keep your server alive 24/7
+     - Keep your server alive if the internal task fails
 
-### **Option B: External Cron Service (EasyCron)**
+### **Option C: External Cron Service (EasyCron)**
 
 If you prefer manual setup:
 1. Go to [EasyCron.com](https://www.easycron.com)

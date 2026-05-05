@@ -26,15 +26,16 @@ from .intent import (
     extract_math_expression,
     preferred_tools_for_intent,
 )
-from .rewrite import rewrite_query
+from .rewrite import rewrite_query, generate_rewrite_variants
 from .memory import format_memory_context, remember_interaction
 from .state import AgentState
 from .tools import build_tools, calculator, score_source_quality
 
 DEFAULT_MODEL_NAME = "llama-3.3-70b-versatile"
 DEFAULT_TEMPERATURE = 0.2
-DEFAULT_DEPTH_MODE = "learning_ml"
-VALID_DEPTH_MODES = {"learning_ml", "standard", "concise"}
+VALID_BUDGETS = {"shallow", "medium", "deep"}
+# Deprecation shim: old depth_mode → new reasoning_budget
+_DEPTH_MODE_TO_BUDGET = {"concise": "shallow", "standard": "medium", "learning_ml": "deep"}
 MAX_RETRIES = 1
 SYSTEM_TEMPLATE = """You are a production ReAct assistant.
 
@@ -57,7 +58,7 @@ Rules:
 Context:
 Intent: {intent}
 Answer type: {answer_type}
-Depth mode: {depth_mode}
+Reasoning budget: {reasoning_budget}
 Preferred tools: {tool_order}
 Rewritten query: {rewritten_query}
 Execution plan: {execution_plan}
@@ -191,29 +192,31 @@ def _load_model(model_name: str, temperature: float, api_key: str) -> ChatGroq:
         groq_api_key=api_key,
     )
 
-def _build_system_message_for_depth(
+def _build_system_message(
     intent: str,
-    depth_mode: str,
+    reasoning_budget: str,
     answer_type: str,
     rewritten_query: str,
     execution_plan: str,
     current_step: str,
     memory_context: str,
+    evidence_summary: str = "",
 ) -> SystemMessage:
     tool_order = ", ".join(preferred_tools_for_intent(intent))
-    return SystemMessage(
-        content=SYSTEM_TEMPLATE.format(
-            intent=intent,
-            answer_type=answer_type,
-            depth_mode=depth_mode,
-            tool_order=tool_order,
-            rewritten_query=rewritten_query,
-            execution_plan=execution_plan or "None",
-            current_step=current_step or "answer",
-            memory_context=memory_context or "None",
-            response_template=_build_response_template(intent, depth_mode, answer_type),
-        )
+    template_content = SYSTEM_TEMPLATE.format(
+        intent=intent,
+        answer_type=answer_type,
+        reasoning_budget=reasoning_budget,
+        tool_order=tool_order,
+        rewritten_query=rewritten_query,
+        execution_plan=execution_plan or "None",
+        current_step=current_step or "answer",
+        memory_context=memory_context or "None",
+        response_template=_build_response_template(intent, answer_type),
     )
+    if evidence_summary:
+        template_content += f"\n\nEvidence pack:\n{evidence_summary}"
+    return SystemMessage(content=template_content)
 
 
 def _build_forced_tool_instruction(answer_type: str, tool_calls_made: list[str]) -> str:
@@ -277,8 +280,19 @@ def _build_planner_node(model_name: str):
             classifier_confidence = float(state.get("classifier_confidence", 0.0))
             subtasks = list(state.get("subtasks", []))
 
+        # Compute reasoning budget: respect explicit setting, otherwise auto-compute
+        mock_state = dict(state)
+        mock_state["answer_type"] = answer_type
+        mock_state["classifier_confidence"] = classifier_confidence
+        budget = _resolve_reasoning_budget(mock_state)
+
         plan = _build_plan(intent, answer_type, query)
-        memory_context = format_memory_context(query, limit=2)
+        memory_context = format_memory_context(query, budget=budget)
+
+        # Generate rewrite variants for deep budget
+        rewrite_variants: list[str] = []
+        if budget == "deep":
+            rewrite_variants = generate_rewrite_variants(query, answer_type, intent)
 
         return {
             "intent": intent,
@@ -289,16 +303,19 @@ def _build_planner_node(model_name: str):
             "classifier_label": intent if route_source == "classifier" else "",
             "plan": plan,
             "plan_index": 0,
+            "reasoning_budget": budget,
             "memory_context": memory_context,
+            "rewrite_variants": rewrite_variants,
             "metrics": {
                 "plan_length": len(plan),
+                "reasoning_budget": budget,
             },
         }
 
     return planner_node
 
 
-def _build_response_template(intent: str, depth_mode: str, answer_type: str) -> str:
+def _build_response_template(intent: str, answer_type: str) -> str:
     if answer_type == ANSWER_FACT:
         return FACT_TEMPLATE
 
@@ -316,8 +333,6 @@ def _build_response_template(intent: str, depth_mode: str, answer_type: str) -> 
 
     if answer_type == ANSWER_COMPARISON or intent == INTENT_COMPARATIVE:
         return COMPARISON_TEMPLATE
-    if depth_mode == "concise":
-        return EXPLANATION_TEMPLATE + "\n- Keep each section brief, but still include an example and a step breakdown."
 
     return EXPLANATION_TEMPLATE
 
@@ -361,28 +376,54 @@ def _collect_evidence(messages: list[Any]) -> str:
     return "\n\n".join(evidence[-3:])
 
 
-def _resolve_depth_mode(state: AgentState) -> str:
-    explicit_depth_mode = str(state.get("depth_mode") or "").strip().lower()
-    if explicit_depth_mode in VALID_DEPTH_MODES:
-        return explicit_depth_mode
+def _resolve_reasoning_budget(state: AgentState) -> str:
+    """Compute reasoning budget from state, with deprecation shim for depth_mode."""
+    # Check explicit reasoning_budget first
+    explicit_budget = str(state.get("reasoning_budget") or "").strip().lower()
+    if explicit_budget in VALID_BUDGETS:
+        return explicit_budget
 
-    query = _extract_user_query(list(state.get("messages", []))).lower()
-    if any(keyword in query for keyword in ["concise", "brief", "short answer", "short version"]):
-        return "concise"
+    # Deprecation shim: accept old depth_mode values
+    old_depth_mode = str(state.get("depth_mode", "") if "depth_mode" in state else "").strip().lower()
+    if old_depth_mode in _DEPTH_MODE_TO_BUDGET:
+        return _DEPTH_MODE_TO_BUDGET[old_depth_mode]
 
-    if any(
-        keyword in query
-        for keyword in [
-            "explain like i'm learning ml",
-            "explain like i am learning ml",
-            "give intuition + math + example",
-            "intuition + math + example",
-            "intuition, math, and example",
-        ]
-    ):
-        return "learning_ml"
+    # Auto-compute from answer_type + confidence + query complexity
+    answer_type = str(state.get("answer_type") or "").strip().lower()
+    classifier_confidence = float(state.get("classifier_confidence", 0.0))
+    query = _extract_user_query(list(state.get("messages", [])))
+    return _compute_reasoning_budget(answer_type, classifier_confidence, query)
 
-    return DEFAULT_DEPTH_MODE
+
+def _compute_reasoning_budget(
+    answer_type: str,
+    classifier_confidence: float,
+    query: str,
+) -> str:
+    """Map answer_type + confidence + query complexity → shallow | medium | deep."""
+    # Fast paths: always shallow
+    if answer_type in {ANSWER_FACT, ANSWER_CALCULATION, ANSWER_AMBIGUOUS}:
+        return "shallow"
+
+    # Multi-part: always deep
+    if answer_type == ANSWER_MULTI:
+        return "deep"
+
+    # For explanation/comparison/list: check complexity signals
+    word_count = len(query.split())
+    is_complex_query = word_count > 8
+    is_low_confidence = classifier_confidence < 0.6
+
+    if answer_type in {ANSWER_COMPARISON, ANSWER_EXPLANATION}:
+        if is_low_confidence or is_complex_query:
+            return "deep"
+        return "medium"
+
+    if answer_type == ANSWER_LIST:
+        return "medium"
+
+    # Default: medium for anything unclassified
+    return "medium"
 
 
 def _compute_confidence(evidence: str) -> str:
@@ -473,16 +514,13 @@ def _answer_quality_issues(
     answer: str,
     answer_type: str,
     intent: str,
-    depth_mode: str,
+    reasoning_budget: str = "medium",
     tool_calls_made: list[str] | None = None,
 ) -> list[str]:
     normalized_answer = answer.lower()
     issues: list[str] = []
     used_tools = {tool_name.lower() for tool_name in (tool_calls_made or [])}
     search_tools_used = any(tool in used_tools for tool in {"tavily_search", "wikipedia_lookup"})
-
-    def has_text(text: str) -> bool:
-        return text.lower() in normalized_answer
 
     def has_table() -> bool:
         return any("|" in line for line in answer.splitlines())
@@ -493,6 +531,7 @@ def _answer_quality_issues(
             for token in ["tradeoff", "trade-off", "best for", "better when", "use case", "works well", "less suited"]
         )
 
+    # ── Format checks (all budgets) ──────────────────────────────────────────
     if answer_type == ANSWER_COMPARISON or intent == INTENT_COMPARATIVE:
         if not has_table():
             issues.append("missing comparison table")
@@ -517,33 +556,57 @@ def _answer_quality_issues(
             issues.append("must ask exactly one clarification question")
         if re.search(r"(?im)^\*\*(?:answer|sources|result):\*\*", answer):
             issues.append("should not answer before clarification")
-
     elif answer_type == ANSWER_MULTI:
         if "### Explanation" not in answer and "### Calculation" not in answer:
             issues.append("missing multi-part headers")
-
     else:
-        # For EXPLANATION and other defaults, check for structure more flexibly
         has_summary = re.search(r"(?im)\*\*summary:\*\*", answer)
         has_intuition = re.search(r"(?im)\*\*1\.\s*intuition\*\*|\*\*intuition\*\*", answer)
         has_breakdown = re.search(r"(?im)\*\*2\.\s*breakdown\*\*|\*\*breakdown\*\*", answer)
         has_any_structure = has_summary or has_intuition or has_breakdown
-        
-        if not has_any_structure:
-            # Only fail if completely empty or no structure whatsoever
-            if len(answer.strip()) < 40:
-                issues.append("answer too short")
-            else:
-                # Answer has length but may need structure - only warn if learning_ml
-                if depth_mode == "learning_ml":
-                    if not any(token in normalized_answer for token in ["intuition", "example", "breakdown", "explain"]):
-                        issues.append("missing learning-style structure")
-        else:
-            # Has some structure - be lenient
-            if depth_mode == "learning_ml":
-                if not any(token in normalized_answer for token in ["intuition", "example", "breakdown", "explain"]):
-                    # Tolerate minor issues if structure is present
-                    pass
+        if not has_any_structure and len(answer.strip()) < 40:
+            issues.append("answer too short")
+
+    # ── Content-aware critic checks (deep budget only) ───────────────────────
+    if reasoning_budget == "deep":
+        issues.extend(_critic_content_checks(answer, answer_type, intent))
+
+    return issues
+
+
+def _critic_content_checks(answer: str, answer_type: str, intent: str) -> list[str]:
+    """Heuristic content checks — no LLM calls. Only runs for deep budget."""
+    normalized = answer.lower()
+    issues: list[str] = []
+
+    # 1) Overclaim detection: absolute language without hedging
+    _OVERCLAIM_TOKENS = ["always ", "never ", " all ", " none ", "every single", "impossible to"]
+    _HEDGE_TOKENS = ["generally", "typically", "in most cases", "often", "usually", "tends to"]
+    has_overclaim = any(tok in normalized for tok in _OVERCLAIM_TOKENS)
+    has_hedge = any(tok in normalized for tok in _HEDGE_TOKENS)
+    if has_overclaim and not has_hedge:
+        issues.append("overclaim_detected: uses absolute language without hedging")
+
+    # 2) Common ML/AI taxonomy confusion
+    _CONFUSION_PAIRS = [
+        ("agentic ai", "ai agent"),
+        ("machine learning", "deep learning"),
+        ("supervised", "unsupervised"),
+        ("classification", "regression"),
+    ]
+    for term_a, term_b in _CONFUSION_PAIRS:
+        if term_a in normalized and term_b in normalized:
+            if f"{term_a} is {term_b}" in normalized or f"{term_b} is {term_a}" in normalized:
+                issues.append(f"taxonomy_confusion: conflates '{term_a}' with '{term_b}'")
+
+    # 3) Empty substance check: answer has length but no real content
+    if len(answer.strip()) > 100:
+        filler_count = sum(
+            1 for phrase in ["it depends", "there are many", "it varies", "in general"]
+            if phrase in normalized
+        )
+        if filler_count >= 2:
+            issues.append("low_substance: answer relies on filler phrases")
 
     return issues
 
@@ -605,20 +668,24 @@ def _build_agent_node(model_name: str, temperature: float):
 
     def agent_node(state: AgentState) -> dict[str, Any]:
         intent = state.get("intent", INTENT_DISCOVERY)
-        depth_mode = _resolve_depth_mode(state)
+        budget = _resolve_reasoning_budget(state)
         answer_type = _resolve_answer_type(state)
         history = list(state.get("messages", []))
         user_query = _extract_user_query(history)
         evidence = _collect_evidence(history)
         confidence = _compute_confidence(evidence)
-        rewritten_query = rewrite_query(user_query, answer_type, intent) if user_query else ""
+        rewritten_query = rewrite_query(user_query, answer_type, intent, budget=budget) if user_query else ""
         plan = list(state.get("plan", []))
         plan_index = int(state.get("plan_index", 0))
         current_step = _current_plan_step(plan, plan_index)
-        memory_context = str(state.get("memory_context") or "").strip() or format_memory_context(user_query, limit=2)
+        memory_context = str(state.get("memory_context") or "").strip() or format_memory_context(user_query, budget=budget)
         tool_calls_made = list(state.get("tool_calls_made", []))
         forced_instruction = _build_forced_tool_instruction(answer_type, tool_calls_made)
         effective_temperature = _resolve_model_temperature(answer_type)
+
+        # Build evidence summary from evidence_pack if available
+        evidence_pack = state.get("evidence_pack") or {}
+        evidence_summary = evidence_pack.get("summary", "") if evidence_pack else ""
 
         if answer_type == ANSWER_AMBIGUOUS and user_query:
             clarification = f'Could you clarify what you mean by "{user_query.strip()}"?'
@@ -626,7 +693,7 @@ def _build_agent_node(model_name: str, temperature: float):
                 "messages": [AIMessage(content=clarification)],
                 "final_answer": clarification,
                 "final_answer_reviewed": False,
-                "depth_mode": depth_mode,
+                "reasoning_budget": budget,
                 "answer_type": answer_type,
                 "plan": plan,
                 "plan_index": plan_index,
@@ -636,7 +703,7 @@ def _build_agent_node(model_name: str, temperature: float):
                 "needs_retry": False,
                 "validation_errors": [],
                 "answer_format_ok": False,
-                "metrics": {"plan_length": len(plan), "steps": int(state.get("iteration_count", 0))},
+                "metrics": {"plan_length": len(plan), "steps": int(state.get("iteration_count", 0)), "reasoning_budget": budget},
             }
 
         if answer_type == ANSWER_CALCULATION and user_query:
@@ -646,7 +713,7 @@ def _build_agent_node(model_name: str, temperature: float):
                     "messages": [AIMessage(content=calculation_answer)],
                     "final_answer": calculation_answer,
                     "final_answer_reviewed": False,
-                    "depth_mode": depth_mode,
+                    "reasoning_budget": budget,
                     "answer_type": answer_type,
                     "plan": plan,
                     "plan_index": plan_index,
@@ -656,7 +723,7 @@ def _build_agent_node(model_name: str, temperature: float):
                     "needs_retry": False,
                     "validation_errors": [],
                     "answer_format_ok": False,
-                    "metrics": {"plan_length": len(plan), "steps": int(state.get("iteration_count", 0))},
+                    "metrics": {"plan_length": len(plan), "steps": int(state.get("iteration_count", 0)), "reasoning_budget": budget},
                 }
         model = _load_model(model_name, effective_temperature, os.getenv("GROQ_API_KEY", ""))
         model_with_tools = model.bind_tools(tools)
@@ -666,7 +733,7 @@ def _build_agent_node(model_name: str, temperature: float):
             subtasks = state.get("subtasks", [])
             
             if "explanation" in subtasks:
-                sys_expl = _build_system_message_for_depth("explanation", depth_mode, ANSWER_EXPLANATION, rewritten_query, _plan_text(plan), current_step, memory_context)
+                sys_expl = _build_system_message("explanation", budget, ANSWER_EXPLANATION, rewritten_query, _plan_text(plan), current_step, memory_context, evidence_summary)
                 if forced_instruction:
                     sys_expl = SystemMessage(content=f"{sys_expl.content}\n\n{forced_instruction}")
                 isolate_msg = HumanMessage(content="CRITICAL INSTRUCTION: You are executing the 'explanation' portion of a multi-part query. ONLY explain the concept. Do NOT perform the calculation or answer other parts.")
@@ -678,7 +745,7 @@ def _build_agent_node(model_name: str, temperature: float):
                 if calc_ans:
                     parts.append(f"### Calculation\n{calc_ans}")
                 else:
-                    sys_calc = _build_system_message_for_depth("calculation", depth_mode, ANSWER_CALCULATION, rewritten_query, _plan_text(plan), current_step, memory_context)
+                    sys_calc = _build_system_message("calculation", budget, ANSWER_CALCULATION, rewritten_query, _plan_text(plan), current_step, memory_context)
                     isolate_msg = HumanMessage(content="CRITICAL INSTRUCTION: You are executing the 'calculation' portion of a multi-part query. ONLY perform the calculation. Do NOT explain other concepts.")
                     resp_calc = model_with_tools.invoke([sys_calc, *history, isolate_msg])
                     parts.append(f"### Calculation\n{str(resp_calc.content or '').strip()}")
@@ -688,7 +755,7 @@ def _build_agent_node(model_name: str, temperature: float):
                 "messages": [AIMessage(content=final_answer)],
                 "final_answer": final_answer,
                 "final_answer_reviewed": False,
-                "depth_mode": depth_mode,
+                "reasoning_budget": budget,
                 "answer_type": answer_type,
                 "plan": plan,
                 "plan_index": min(plan_index + 1, len(plan)),
@@ -699,17 +766,18 @@ def _build_agent_node(model_name: str, temperature: float):
                 "validation_errors": [],
                 "answer_format_ok": False,
                 "iteration_count": int(state.get("iteration_count", 0)) + 1,
-                "metrics": {"plan_length": len(plan), "steps": int(state.get("iteration_count", 0)) + 1},
+                "metrics": {"plan_length": len(plan), "steps": int(state.get("iteration_count", 0)) + 1, "reasoning_budget": budget},
             }
 
-        system_message = _build_system_message_for_depth(
+        system_message = _build_system_message(
             intent,
-            depth_mode,
+            budget,
             answer_type,
             rewritten_query,
             _plan_text(plan),
             current_step,
             memory_context,
+            evidence_summary,
         )
         if forced_instruction:
             system_message = SystemMessage(content=f"{system_message.content}\n\n{forced_instruction}")
@@ -719,7 +787,7 @@ def _build_agent_node(model_name: str, temperature: float):
         updates: dict[str, Any] = {
             "messages": [response],
             "iteration_count": int(state.get("iteration_count", 0)) + 1,
-            "depth_mode": depth_mode,
+            "reasoning_budget": budget,
             "answer_type": answer_type,
             "plan": plan,
             "plan_index": min(plan_index + 1, len(plan)),
@@ -731,7 +799,7 @@ def _build_agent_node(model_name: str, temperature: float):
             "confidence": confidence,
             "validation_errors": [],
             "answer_format_ok": False,
-            "metrics": {"plan_length": len(plan), "steps": int(state.get("iteration_count", 0)) + 1},
+            "metrics": {"plan_length": len(plan), "steps": int(state.get("iteration_count", 0)) + 1, "reasoning_budget": budget},
         }
 
         tool_names = _extract_tool_names(response)
@@ -748,6 +816,109 @@ def _build_agent_node(model_name: str, temperature: float):
     return agent_node, tools
 
 
+def _build_evidence_pack_node():
+    """Pure Python node: aggregates tool outputs into a structured evidence pack.
+
+    No LLM calls — zero extra token cost. Runs between agent and review.
+    For shallow budget, passes through without building a pack.
+    """
+
+    def evidence_pack_node(state: AgentState) -> dict[str, Any]:
+        budget = _resolve_reasoning_budget(state)
+        messages = list(state.get("messages", []))
+        user_query = _extract_user_query(messages)
+
+        # Shallow budget: skip evidence aggregation entirely
+        if budget == "shallow":
+            return {"evidence_pack": {}, "critic_issues": []}
+
+        # Collect all tool evidence
+        snippets: list[dict[str, Any]] = []
+        for message in messages:
+            if not isinstance(message, ToolMessage):
+                continue
+            content = str(message.content or "").strip()
+            if not content:
+                continue
+
+            try:
+                payload = json.loads(content)
+            except json.JSONDecodeError:
+                payload = None
+
+            if isinstance(payload, dict) and isinstance(payload.get("results"), list):
+                for result in payload.get("results", [])[:5]:
+                    if not isinstance(result, dict):
+                        continue
+                    url = str(result.get("url") or "").strip()
+                    title = str(result.get("title") or "").strip()
+                    snippet = str(result.get("snippet") or "").strip()
+                    score = int(result.get("score", 0)) or score_source_quality(url, snippet, title)
+                    if url or snippet:
+                        snippets.append({"title": title, "url": url, "snippet": snippet, "score": score})
+            else:
+                # Raw text tool output (e.g. wikipedia)
+                snippets.append({"title": "", "url": "", "snippet": content[:300], "score": 2})
+
+        # Sort by quality score descending
+        snippets.sort(key=lambda s: s.get("score", 0), reverse=True)
+
+        # Build contradiction flags (simple heuristic: check for negation patterns)
+        contradiction_flags: list[str] = []
+        if len(snippets) >= 2:
+            texts = [s.get("snippet", "").lower() for s in snippets[:4]]
+            _NEGATION_PAIRS = [
+                ("is not", "is"),
+                ("does not", "does"),
+                ("cannot", "can"),
+                ("no longer", "still"),
+            ]
+            for neg, pos in _NEGATION_PAIRS:
+                has_neg = any(neg in t for t in texts)
+                has_pos = any(pos in t and neg not in t for t in texts)
+                if has_neg and has_pos:
+                    contradiction_flags.append(f"possible contradiction: '{neg}' vs '{pos}' in sources")
+
+        # Build summary string for injection into system prompt
+        summary_lines = [f"Query: {user_query}"]
+        rewrite_variants = list(state.get("rewrite_variants", []))
+        if rewrite_variants:
+            summary_lines.append(f"Rewrite variants: {'; '.join(rewrite_variants[:4])}")
+        summary_lines.append(f"Evidence ({len(snippets)} sources, sorted by quality):")
+        for i, s in enumerate(snippets[:5], 1):
+            title = s.get("title", "")
+            snippet = s.get("snippet", "")[:200]
+            score = s.get("score", 0)
+            summary_lines.append(f"  [{i}] (score={score}) {title}: {snippet}")
+        if contradiction_flags:
+            summary_lines.append(f"Contradictions: {'; '.join(contradiction_flags)}")
+
+        evidence_pack = {
+            "query": user_query,
+            "rewrite_variants": rewrite_variants,
+            "snippets": snippets[:5],
+            "contradiction_flags": contradiction_flags,
+            "source_count": len(snippets),
+            "summary": "\n".join(summary_lines),
+        }
+
+        # Run critic checks for deep budget
+        critic_issues: list[str] = []
+        if budget == "deep":
+            draft = str(state.get("final_answer") or "").strip()
+            if draft:
+                answer_type = _resolve_answer_type(state)
+                intent = str(state.get("intent", INTENT_DISCOVERY))
+                critic_issues = _critic_content_checks(draft, answer_type, intent)
+
+        return {
+            "evidence_pack": evidence_pack,
+            "critic_issues": critic_issues,
+        }
+
+    return evidence_pack_node
+
+
 def _build_review_node(model_name: str, temperature: float):
     def review_node(state: AgentState) -> dict[str, Any]:
         messages = list(state.get("messages", []))
@@ -761,22 +932,27 @@ def _build_review_node(model_name: str, temperature: float):
         query = _extract_user_query(messages)
         intent = str(state.get("intent", INTENT_DISCOVERY))
         answer_type = _resolve_answer_type(state)
-        depth_mode = _resolve_depth_mode(state)
+        budget = _resolve_reasoning_budget(state)
         evidence = _collect_evidence(messages)
         issues = _answer_quality_issues(
             draft_answer,
             answer_type,
             intent,
-            depth_mode,
-            list(state.get("tool_calls_made", [])),
+            reasoning_budget=budget,
+            tool_calls_made=list(state.get("tool_calls_made", [])),
         )
+
+        # Merge critic issues from evidence_pack phase
+        critic_issues = list(state.get("critic_issues", []))
+        if critic_issues:
+            issues.extend(critic_issues)
 
         if answer_type in {ANSWER_AMBIGUOUS, ANSWER_CALCULATION, ANSWER_MULTI, ANSWER_EXPLANATION}:
             return {
                 "messages": [AIMessage(content=draft_answer)],
                 "final_answer": draft_answer,
                 "final_answer_reviewed": True,
-                "depth_mode": depth_mode,
+                "reasoning_budget": budget,
                 "validation_errors": issues,
                 "answer_format_ok": not issues,
             }
@@ -806,12 +982,11 @@ Instructions:
 - Use exactly one blank line between sections.
 - Return nothing except the correctly formatted answer.
 """.format(
-                    response_template=_build_response_template(intent, depth_mode, answer_type),
+                    response_template=_build_response_template(intent, answer_type),
                     issues="\n".join(f"- {issue}" for issue in issues) if issues else "- None",
                     query=query,
                     intent=intent,
                     answer_type=answer_type,
-                    depth_mode=depth_mode,
                     draft_answer=draft_answer,
                     evidence=evidence,
                 )
@@ -824,15 +999,14 @@ Instructions:
             response = model.invoke(prompt)
             candidate_answer = str(response.content or "").strip()
             if candidate_answer:
-                # Restore any collapsed formatting from the LLM rewrite
                 candidate_answer = _restore_collapsed_formatting(candidate_answer, answer_type)
                 revised_answer = candidate_answer
             issues = _answer_quality_issues(
                 revised_answer,
                 answer_type,
                 intent,
-                depth_mode,
-                list(state.get("tool_calls_made", [])),
+                reasoning_budget=budget,
+                tool_calls_made=list(state.get("tool_calls_made", [])),
             )
             if not issues:
                 break
@@ -864,34 +1038,29 @@ Intent:
 Answer type:
 {answer_type}
 
-Depth mode:
-{depth_mode}
-
 Draft answer:
 {draft_answer}
 
 Evidence:
 {evidence}
 """.format(
-                    response_template=_build_response_template(intent, depth_mode, answer_type),
+                    response_template=_build_response_template(intent, answer_type),
                     issues="\n".join(f"- {issue}" for issue in issues),
                     query=query,
                     intent=intent,
                     answer_type=answer_type,
-                    depth_mode=depth_mode,
                     draft_answer=revised_answer,
                     evidence=evidence,
                 )
             )
 
-        # Final formatting restoration before returning
         revised_answer = _restore_collapsed_formatting(revised_answer, answer_type)
         
         return {
             "messages": [AIMessage(content=revised_answer)],
             "final_answer": revised_answer,
             "final_answer_reviewed": True,
-            "depth_mode": depth_mode,
+            "reasoning_budget": budget,
             "validation_errors": issues,
             "answer_format_ok": not issues,
         }
@@ -905,20 +1074,24 @@ def _build_validate_node():
         messages = list(state.get("messages", []))
         intent = str(state.get("intent", INTENT_DISCOVERY))
         answer_type = _resolve_answer_type(state)
-        depth_mode = _resolve_depth_mode(state)
+        budget = _resolve_reasoning_budget(state)
+
+        # Budget-aware max retries: shallow=0, medium=1, deep=2
+        max_retries = {"shallow": 0, "medium": 1, "deep": 2}.get(budget, MAX_RETRIES)
+
         issues = _answer_quality_issues(
             answer,
             answer_type,
             intent,
-            depth_mode,
-            list(state.get("tool_calls_made", [])),
+            reasoning_budget=budget,
+            tool_calls_made=list(state.get("tool_calls_made", [])),
         )
 
         if not answer:
             issues.append("empty answer")
 
         retry_count = int(state.get("retry_count", 0))
-        if issues and retry_count < MAX_RETRIES:
+        if issues and retry_count < max_retries:
             rewritten_query = str(state.get("rewritten_query") or "").strip()
             issues_text = "\n- ".join(issues)
             retry_count += 1
@@ -939,6 +1112,7 @@ def _build_validate_node():
                 "needs_retry": True,
                 "validation_errors": issues,
                 "answer_format_ok": False,
+                "critic_issues": issues,
             }
 
         if issues:
@@ -963,7 +1137,9 @@ def _build_validate_node():
                     "answer_type": answer_type,
                     "confidence": state.get("confidence"),
                     "tools_used": list(state.get("tool_calls_made", [])),
+                    "reasoning_budget": budget,
                 },
+                budget=budget,
             )
 
         return {
@@ -1018,7 +1194,7 @@ def _should_continue(state: AgentState) -> str:
     final_answer = str(state.get("final_answer") or "").strip()
     if isinstance(last_message, AIMessage) and final_answer:
         if not bool(state.get("final_answer_reviewed", False)):
-            return "review"
+            return "evidence_pack"
         if bool(state.get("needs_retry", False)):
             return "agent"
 
@@ -1038,6 +1214,7 @@ def build_graph(model_name: str | None = None, temperature: float | None = None)
     resolved_temperature = _resolve_temperature() if temperature is None else temperature
     planner_node = _build_planner_node(resolved_model_name)
     agent_node, tools = _build_agent_node(resolved_model_name, resolved_temperature)
+    evidence_pack_node = _build_evidence_pack_node()
     review_node = _build_review_node(resolved_model_name, resolved_temperature)
     validate_node = _build_validate_node()
     tool_node = ToolNode(tools)
@@ -1045,13 +1222,15 @@ def build_graph(model_name: str | None = None, temperature: float | None = None)
     workflow = StateGraph(AgentState)
     workflow.add_node("planner", planner_node)
     workflow.add_node("agent", agent_node)
+    workflow.add_node("evidence_pack", evidence_pack_node)
     workflow.add_node("review", review_node)
     workflow.add_node("validate", validate_node)
     workflow.add_node("tools", tool_node)
     workflow.add_edge(START, "planner")
     workflow.add_edge("planner", "agent")
-    workflow.add_conditional_edges("agent", _should_continue, {"tools": "tools", "review": "review", END: END})
+    workflow.add_conditional_edges("agent", _should_continue, {"tools": "tools", "evidence_pack": "evidence_pack", END: END})
     workflow.add_edge("tools", "agent")
+    workflow.add_edge("evidence_pack", "review")
     workflow.add_edge("review", "validate")
     workflow.add_conditional_edges("validate", _should_retry_after_validation, {"agent": "agent", END: END})
     return workflow.compile()

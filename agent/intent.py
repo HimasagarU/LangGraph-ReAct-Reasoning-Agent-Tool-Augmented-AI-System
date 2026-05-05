@@ -341,7 +341,7 @@ def classify_answer_type(query: str) -> str:
             return ANSWER_LIST
 
     # Contest context: if query mentions prize + contest/competition/challenge, it's likely multiple prizes
-    if any(token in q for token in {"prize", "cost", "price", "cash"}):
+    if any(token in q for token in {"prizes", "costs", "prices"}):
         if any(context in q for context in _CONTEST_CONTEXT):
             return ANSWER_LIST
 

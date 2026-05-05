@@ -2,9 +2,9 @@ name: Keep Render Server Alive
 
 on:
   schedule:
-    # Run every 13 minutes to keep the Render free tier server from spinning down
+    # Run every 10 minutes to keep the Render free tier server from spinning down
     # Render spins down free instances after 15 minutes of inactivity
-    - cron: '*/13 * * * *'
+    - cron: '*/10 * * * *'
   workflow_dispatch:
 
 jobs:
@@ -13,27 +13,36 @@ jobs:
     steps:
       - name: Ping server health endpoint
         run: |
-          # Replace YOUR_RENDER_URL with your actual Render deployment URL
-          # Example: https://langgraph-react-agent.onrender.com
           RENDER_URL="${{ secrets.RENDER_URL }}"
           
           if [ -z "$RENDER_URL" ]; then
-            echo "Error: RENDER_URL secret not set"
+            echo "::error::RENDER_URL secret is not set in GitHub repository settings."
             exit 1
           fi
           
+          # Normalize URL
+          RENDER_URL=$(echo $RENDER_URL | sed 's/\/$//')
+          if [[ ! $RENDER_URL =~ ^http ]]; then
+            RENDER_URL="https://$RENDER_URL"
+          fi
+          
           echo "Pinging $RENDER_URL/ping..."
-          response=$(curl -s -w "\n%{http_code}" "$RENDER_URL/ping" || true)
+          start_time=$(date +%s%N)
+          response=$(curl -s -w "\n%{http_code}" "$RENDER_URL/ping" || echo -e "\n000")
+          end_time=$(date +%s%N)
+          
           http_code=$(echo "$response" | tail -n1)
           body=$(echo "$response" | head -n-1)
+          duration=$(( (end_time - start_time) / 1000000 ))
           
           echo "Response code: $http_code"
           echo "Response body: $body"
+          echo "Duration: ${duration}ms"
           
           if [ "$http_code" -eq 200 ]; then
             echo "✓ Server is alive"
             exit 0
           else
-            echo "✗ Server health check failed"
+            echo "✗ Server health check failed with code $http_code"
             exit 1
           fi

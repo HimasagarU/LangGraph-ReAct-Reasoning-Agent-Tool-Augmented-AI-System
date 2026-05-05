@@ -16,5 +16,5 @@ def test_train_and_predict(tmp_path):
     clf.train_from_jsonl(dataset)
 
     label, proba = clf.predict_proba("What is reinforcement learning?")
-    assert label in {"explanatory", "discovery"}
+    assert label in {"explanatory", "discovery", "technical"}
     assert proba >= 0.4

@@ -15,6 +15,7 @@ dist/
 .idea/
 task.md
 langgraph-react-agent-impl.md
+RENDER_DEPLOYMENT.md
 
 .agent_memory.jsonl
 agent/intent_logs.jsonl

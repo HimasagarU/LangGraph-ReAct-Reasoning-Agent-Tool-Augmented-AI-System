@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import json
-import re
 import os
+import re
 import tempfile
 import threading
 from pathlib import Path
 from typing import Any
 
-ENABLE_MEMORY = False
+# ── Memory toggle ─────────────────────────────────────────────────────────────
+# Set MEMORY_ENABLED=false in env to disable memory writes entirely
+# (useful for ephemeral filesystems like Render free tier).
+MEMORY_ENABLED = os.getenv("MEMORY_ENABLED", "true").lower() in {"true", "1", "yes"}
 
 _MEMORY_PATH = Path(__file__).resolve().parents[1] / ".agent_memory.jsonl"
 _MEMORY_LOCK = threading.Lock()
@@ -43,11 +46,22 @@ def _load_records() -> list[dict[str, Any]]:
     return records
 
 
-def recall_memory(query: str, limit: int = 2) -> list[dict[str, Any]]:
-    """Return the most relevant prior interactions for a query."""
-    if not ENABLE_MEMORY:
+def recall_memory(query: str, budget: str = "shallow", limit: int = 3) -> list[dict[str, Any]]:
+    """Return the most relevant prior interactions for a query.
+
+    Budget controls recall depth:
+    - shallow: disabled (returns empty)
+    - medium: recall 1 record
+    - deep: recall up to `limit` records (default 3)
+    """
+    if not MEMORY_ENABLED:
         return []
-        
+
+    if budget == "shallow":
+        return []
+
+    effective_limit = 1 if budget == "medium" else limit
+
     query_tokens = _tokenize(query)
     if not query_tokens:
         return []
@@ -63,15 +77,21 @@ def recall_memory(query: str, limit: int = 2) -> list[dict[str, Any]]:
         scored_records.append((overlap, record))
 
     scored_records.sort(key=lambda item: item[0], reverse=True)
-    return [record for _, record in scored_records[:limit]]
+    return [record for _, record in scored_records[:effective_limit]]
 
 
-def format_memory_context(query: str, limit: int = 2) -> str:
-    """Format recent relevant memory as a prompt-friendly context block."""
-    if not ENABLE_MEMORY:
+def format_memory_context(query: str, budget: str = "shallow", limit: int = 3) -> str:
+    """Format recent relevant memory as a prompt-friendly context block.
+
+    Budget controls recall depth (see recall_memory).
+    """
+    if not MEMORY_ENABLED:
         return ""
-        
-    records = recall_memory(query, limit=limit)
+
+    if budget == "shallow":
+        return ""
+
+    records = recall_memory(query, budget=budget, limit=limit)
     if not records:
         return ""
 
@@ -90,11 +110,25 @@ def format_memory_context(query: str, limit: int = 2) -> str:
     return "\n".join(lines)
 
 
-def remember_interaction(query: str, answer: str, metadata: dict[str, Any] | None = None) -> None:
-    """Persist a lightweight interaction record for later recall."""
-    if not ENABLE_MEMORY:
+def remember_interaction(
+    query: str,
+    answer: str,
+    metadata: dict[str, Any] | None = None,
+    budget: str = "shallow",
+) -> None:
+    """Persist a lightweight interaction record for later recall.
+
+    Budget controls storage:
+    - shallow: disabled (no write)
+    - medium: store basic record
+    - deep: store record with failure_mode metadata
+    """
+    if not MEMORY_ENABLED:
         return
-        
+
+    if budget == "shallow":
+        return
+
     payload: dict[str, Any] = {
         "query": query.strip(),
         "answer": answer.strip(),

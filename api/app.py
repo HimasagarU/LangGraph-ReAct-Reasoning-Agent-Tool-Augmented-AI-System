@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 
 from agent.graph import build_graph
 from agent.tools import score_source_quality
+import httpx
 
 load_dotenv()
 
@@ -48,7 +49,18 @@ class QueryRequest(BaseModel):
     query: str = Field(min_length=1, description="User question or prompt.")
     max_iterations: int = Field(default=DEFAULT_MAX_ITERATIONS, ge=1, le=10)
     model_name: str | None = Field(default=None, description="Optional Groq model override.")
-    depth_mode: str | None = Field(default=None, description="Optional answer depth: learning_ml, standard, or concise.")
+    reasoning_budget: str | None = Field(default=None, description="Reasoning depth: shallow, medium, deep, or auto (default).")
+    # Deprecation shim: accept old depth_mode values
+    depth_mode: str | None = Field(default=None, description="Deprecated. Use reasoning_budget instead.")
+
+    def effective_budget(self) -> str | None:
+        """Resolve reasoning_budget, with backward compat for depth_mode."""
+        if self.reasoning_budget:
+            return self.reasoning_budget
+        if self.depth_mode:
+            _SHIM = {"concise": "shallow", "standard": "medium", "learning_ml": "deep"}
+            return _SHIM.get(self.depth_mode, self.depth_mode)
+        return None
 
 
 class TraceStep(BaseModel):
@@ -98,7 +110,10 @@ def _resolve_model_name(explicit_model_name: str | None = None) -> str:
     return explicit_model_name or DEFAULT_MODEL_NAME
 
 def _resolve_temperature() -> float:
-    return float(os.getenv("MODEL_TEMPERATURE", "0.2"))
+    try:
+        return float(os.getenv("MODEL_TEMPERATURE", "0.2"))
+    except ValueError:
+        return 0.2
 
 
 @lru_cache(maxsize=8)
@@ -142,7 +157,7 @@ def _extract_sources(messages: list[Any]) -> list[dict[str, str | None]]:
                 if not url:
                     continue
                 key = url.lower()
-                if key in seen:
+                if key in seen or "localhost" in key or "127.0.0.1" in key:
                     continue
                 title = str(item.get("title") or "").strip() or None
                 snippet = _clean_snippet(str(item.get("snippet") or ""))
@@ -166,7 +181,7 @@ def _extract_sources(messages: list[Any]) -> list[dict[str, str | None]]:
                 continue
             url = match.group(0).rstrip(".,;")
             key = url.lower()
-            if key in seen:
+            if key in seen or "localhost" in key or "127.0.0.1" in key:
                 continue
             title = line[: match.start()].strip(" -")
             if title.lower().startswith("top results"):
@@ -286,21 +301,24 @@ def _best_available_answer(state: dict[str, Any]) -> str:
     return "I could not complete the task with the available evidence."
 
 
-def _build_initial_state(query: str, depth_mode: str | None, max_iterations: int) -> dict[str, Any]:
+def _build_initial_state(query: str, reasoning_budget: str | None, max_iterations: int) -> dict[str, Any]:
     return {
         "messages": [HumanMessage(content=query)],
-        "depth_mode": depth_mode or "",
+        "reasoning_budget": reasoning_budget or "",
         "tool_calls_made": [],
         "iteration_count": 0,
         "max_iterations": max_iterations,
         "confidence": "low",
         "rewritten_query": "",
+        "rewrite_variants": [],
         "retry_count": 0,
         "needs_retry": False,
         "final_answer": "",
         "final_answer_reviewed": False,
         "validation_errors": [],
         "answer_format_ok": False,
+        "evidence_pack": {},
+        "critic_issues": [],
     }
 
 
@@ -308,7 +326,7 @@ def _run_agent_sync(
     query: str,
     max_iterations: int,
     model_name: str,
-    depth_mode: str | None = None,
+    reasoning_budget: str | None = None,
     callbacks: list[BaseCallbackHandler] | None = None,
 ) -> dict[str, Any]:
     started_at = time.perf_counter()
@@ -316,7 +334,7 @@ def _run_agent_sync(
     state = graph.invoke(
         _build_initial_state(
             query=query,
-            depth_mode=depth_mode,
+            reasoning_budget=reasoning_budget,
             max_iterations=max_iterations,
         ),
         config={"callbacks": callbacks or []},
@@ -336,6 +354,7 @@ def _run_agent_sync(
         "tools_used": tools_used,
         "retry_count": int(state.get("retry_count", 0)),
         "confidence": confidence,
+        "reasoning_budget": str(state.get("reasoning_budget", "medium")),
     }
 
     return {
@@ -358,6 +377,43 @@ def _run_agent_sync(
 async def ping() -> dict[str, str]:
     """Ultra-lightweight ping endpoint for cron jobs. No dependencies checked."""
     return {"status": "alive"}
+
+
+async def _keep_alive_loop() -> None:
+    """Background task to ping the server itself to prevent Render spin-down."""
+    external_url = os.getenv("RENDER_EXTERNAL_URL")
+    if not external_url:
+        # Fallback to RENDER_URL if EXTERNAL is not set
+        external_url = os.getenv("RENDER_URL")
+        
+    if not external_url:
+        print("KEEP_ALIVE: No RENDER_EXTERNAL_URL or RENDER_URL set. Self-ping disabled.")
+        return
+
+    # Normalize URL: ensure it starts with http and doesn't have trailing slash for the join
+    external_url = external_url.rstrip("/")
+    if not external_url.startswith("http"):
+        external_url = f"https://{external_url}"
+        
+    ping_url = f"{external_url}/ping"
+    print(f"KEEP_ALIVE: Starting background self-ping for {ping_url}")
+    
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        while True:
+            # Render spins down after 15 mins of inactivity. 
+            # Ping every 10 minutes to stay safely within the window.
+            await asyncio.sleep(600)
+            try:
+                resp = await client.get(ping_url)
+                print(f"KEEP_ALIVE: Self-ping status={resp.status_code}")
+            except Exception as e:
+                print(f"KEEP_ALIVE: Self-ping failed: {e}")
+
+
+@app.on_event("startup")
+async def on_startup():
+    # Start the keep-alive loop in the background
+    asyncio.create_task(_keep_alive_loop())
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -405,7 +461,7 @@ async def agent_query(request: QueryRequest) -> QueryResponse:
             request.query,
             request.max_iterations,
             _resolve_model_name(request.model_name),
-            request.depth_mode,
+            request.effective_budget(),
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -428,7 +484,7 @@ async def _stream_agent_events(request: QueryRequest) -> AsyncIterator[str]:
                 request.query,
                 request.max_iterations,
                 _resolve_model_name(request.model_name),
-                request.depth_mode,
+                request.effective_budget(),
                 callbacks=[callback_handler],
             )
         except Exception as exc:  # pragma: no cover - background worker path

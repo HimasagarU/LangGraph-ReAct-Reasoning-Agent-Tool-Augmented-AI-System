@@ -13,16 +13,28 @@ class MemoryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             memory_path = Path(temp_dir) / "memory.jsonl"
 
-            with patch.object(memory, "_MEMORY_PATH", memory_path), patch.object(memory, "MAX_RECORDS", 2):
-                memory.remember_interaction("query 1", "answer 1")
-                memory.remember_interaction("query 2", "answer 2")
-                memory.remember_interaction("query 3", "answer 3")
+            with patch.object(memory, "_MEMORY_PATH", memory_path), \
+                 patch.object(memory, "MAX_RECORDS", 2), \
+                 patch.object(memory, "MEMORY_ENABLED", True):
+                memory.remember_interaction("query 1", "answer 1", budget="medium")
+                memory.remember_interaction("query 2", "answer 2", budget="medium")
+                memory.remember_interaction("query 3", "answer 3", budget="medium")
 
                 contents = memory_path.read_text(encoding="utf-8").strip().splitlines()
 
         self.assertEqual(len(contents), 2)
         self.assertIn("query 2", contents[0])
         self.assertIn("query 3", contents[1])
+
+    def test_shallow_budget_does_not_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            memory_path = Path(temp_dir) / "memory.jsonl"
+
+            with patch.object(memory, "_MEMORY_PATH", memory_path), \
+                 patch.object(memory, "MEMORY_ENABLED", True):
+                memory.remember_interaction("query", "answer", budget="shallow")
+
+        self.assertFalse(memory_path.exists())
 
 
 if __name__ == "__main__":

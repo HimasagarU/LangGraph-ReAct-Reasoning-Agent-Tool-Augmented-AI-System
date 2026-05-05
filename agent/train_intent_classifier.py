@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from agent.classifier import IntentClassifier
 
 
@@ -14,7 +15,10 @@ def main(dataset_path: str, model_path: str | None = None, eval_split: float = 0
         metrics = clf.train_from_jsonl(dataset_path, eval_split=eval_split)
     except Exception as e:
         print(f"Error during training: {e}")
-        return
+        sys.exit(1)
+
+    clf.metadata["threshold"] = threshold
+    clf.save()
 
     print(f"Trained classifier saved to {clf.model_path}")
     

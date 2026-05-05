@@ -82,7 +82,6 @@ def _format_tavily_results(payload: Any) -> str:
     if not results:
         return json.dumps({"results": []}, ensure_ascii=False)
 
-    normalized_results: list[tuple[int, str]] = []
     structured_results: list[dict[str, Any]] = []
     for result in results[:3]:
         title = _clean_text(str(result.get("title") or "").strip(), 120)
@@ -90,8 +89,6 @@ def _format_tavily_results(payload: Any) -> str:
         snippet = _clean_text(str(result.get("content") or result.get("snippet") or "").strip(), 220)
         if not url:
             continue
-        line = " - ".join(part for part in [title, url, snippet] if part)
-        normalized_results.append((score_source_quality(url, snippet=snippet, title=title), line))
         structured_results.append(
             {
                 "title": title,
@@ -101,10 +98,6 @@ def _format_tavily_results(payload: Any) -> str:
             }
         )
 
-    if not normalized_results:
-        return json.dumps({"results": []}, ensure_ascii=False)
-
-    normalized_results.sort(key=lambda item: item[0], reverse=True)
     structured_results.sort(key=lambda item: item["score"], reverse=True)
     return json.dumps({"results": structured_results}, ensure_ascii=False)
 
@@ -190,7 +183,7 @@ def tavily_search(query: str) -> str:
     """Search the web for current information and return the top results."""
     api_key = os.getenv("TAVILY_API_KEY")
     if not api_key:
-        return "Tavily search is unavailable because TAVILY_API_KEY is not set."
+        return json.dumps({"results": [], "error": "Tavily search is unavailable because TAVILY_API_KEY is not set."})
 
     try:
         search_client = TavilyClient(api_key=api_key)
@@ -204,7 +197,7 @@ def tavily_search(query: str) -> str:
             include_images=False,
         )
     except Exception as exc:
-        return _handle_tool_error("Tavily search", exc)
+        return json.dumps({"results": [], "error": _handle_tool_error("Tavily search", exc)})
 
     return _format_tavily_results(result)
 
@@ -233,18 +226,23 @@ def wikipedia_lookup(query: str) -> str:
 def calculator(expression: str) -> str:
     """Safely evaluate a mathematical expression."""
     allowed_characters = set("0123456789+-*/()., ")
+    def _format_calc_error(msg: str) -> str:
+        return json.dumps({"results": [{"title": "Calculation Error", "url": "calculator", "snippet": msg}]})
+
     if not expression:
-        return "Error: expression is empty"
+        return _format_calc_error("Error: expression is empty")
     if any(character not in allowed_characters for character in expression):
-        return "Error: invalid characters in expression"
+        return _format_calc_error("Error: invalid characters in expression")
 
     try:
         result = round(_safe_eval(expression), 6)
         if float(result).is_integer():
-            return str(int(result))
-        return str(result)
+            final_res = str(int(result))
+        else:
+            final_res = str(result)
+        return json.dumps({"results": [{"title": "Calculation Result", "url": "calculator", "snippet": final_res}]})
     except Exception as exc:
-        return f"Error: {exc}"
+        return _format_calc_error(f"Error: {exc}")
 
 
 def build_tools() -> list[BaseTool]:

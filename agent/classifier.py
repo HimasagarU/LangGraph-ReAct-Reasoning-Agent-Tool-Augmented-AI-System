@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import collections
 import json
 import os
 import time
+import warnings
 from typing import Tuple, Any
 
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -24,10 +26,16 @@ class IntentClassifier:
             self._load()
 
     def _load(self) -> None:
-        data = joblib.load(self.model_path)
-        self.vectorizer = data.get("vectorizer")
-        self.model = data.get("model")
-        self.metadata = data.get("metadata", {})
+        try:
+            data = joblib.load(self.model_path)
+            self.vectorizer = data.get("vectorizer")
+            self.model = data.get("model")
+            self.metadata = data.get("metadata", {})
+        except Exception as e:
+            print(f"Warning: Failed to load model from {self.model_path}: {e}")
+            self.vectorizer = None
+            self.model = None
+            self.metadata = {}
 
     def save(self) -> None:
         if not (self.vectorizer and self.model):
@@ -38,7 +46,7 @@ class IntentClassifier:
             "metadata": self.metadata
         }, self.model_path)
 
-    def train_from_jsonl(self, path: str, eval_split: float = 0.2) -> dict[str, Any]:
+    def train_from_jsonl(self, path: str, eval_split: float = 0.2, max_features: int = 10000, ngram_range: Tuple[int, int] = (1, 2)) -> dict[str, Any]:
         texts: list[str] = []
         labels: list[str] = []
         
@@ -49,13 +57,15 @@ class IntentClassifier:
                 try:
                     obj = json.loads(line)
                 except json.JSONDecodeError:
-                    raise ValueError(f"Invalid JSON at line {i}")
+                    print(f"Warning: Invalid JSON at line {i}, skipping.")
+                    continue
                     
                 text = str(obj.get("text") or "").strip()
-                label = str(obj.get("label") or "").strip().lower()
+                label = str(obj.get("label") or obj.get("intent") or "").strip().lower()
                 
                 if not text or not label:
-                    raise ValueError(f"Missing text or label at line {i}")
+                    print(f"Warning: Missing text or label at line {i}, skipping.")
+                    continue
                     
                 texts.append(text)
                 labels.append(label)
@@ -63,10 +73,14 @@ class IntentClassifier:
         if not texts:
             raise ValueError("No training examples found")
 
-        self.vectorizer = TfidfVectorizer(ngram_range=(1, 2), max_features=10000)
+        self.vectorizer = TfidfVectorizer(ngram_range=ngram_range, max_features=max_features)
+        
+        label_counts = collections.Counter(labels)
+        min_label_count = min(label_counts.values()) if label_counts else 0
         
         if eval_split > 0 and len(texts) > 5:
-            X_train, X_test, y_train, y_test = train_test_split(texts, labels, test_size=eval_split, random_state=42, stratify=labels)
+            stratify_labels = labels if min_label_count > 1 else None
+            X_train, X_test, y_train, y_test = train_test_split(texts, labels, test_size=eval_split, random_state=42, stratify=stratify_labels)
         else:
             X_train, y_train = texts, labels
             X_test, y_test = [], []
@@ -85,7 +99,10 @@ class IntentClassifier:
             "seed": 42,
             "labels": list(self.model.classes_),
             "vectorizer_params": self.vectorizer.get_params(),
-            "metrics": metrics
+            "metrics": metrics,
+            "train_size": len(X_train),
+            "eval_size": len(X_test),
+            "class_counts": dict(label_counts)
         }
         self.save()
         return metrics
@@ -118,6 +135,7 @@ class IntentClassifier:
 
     def predict_proba(self, text: str) -> Tuple[str, float]:
         """Deprecated alias for predict_top_label."""
+        warnings.warn("predict_proba is deprecated, use predict_top_label instead", DeprecationWarning, stacklevel=2)
         label, prob = self.predict_top_label(text)
         return label or "discovery", prob
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, TypedDict
+from typing import Annotated, Any, TypedDict
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
@@ -16,13 +16,16 @@ class AgentState(TypedDict, total=False):
     classifier_label: str
     plan: list[str]
     plan_index: int
-    depth_mode: str
+    reasoning_budget: str  # "shallow" | "medium" | "deep"
     tool_calls_made: list[str]
     iteration_count: int
     max_iterations: int
     confidence: str
     rewritten_query: str
+    rewrite_variants: list[str]  # expanded query variants (deep budget)
     memory_context: str
+    evidence_pack: dict[str, Any]  # structured evidence before generation
+    critic_issues: list[str]  # content-level issues from critic pass
     retry_count: int
     needs_retry: bool
     final_answer: str
