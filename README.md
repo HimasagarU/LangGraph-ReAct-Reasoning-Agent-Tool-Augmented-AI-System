@@ -8,30 +8,68 @@ It includes a browser frontend served from the same FastAPI app, so the health e
 
 ## Architecture
 
-```text
-User Query
-    |
-    v
-Intent Classifier (Multi-intent Detection)
-    |
-    v
-LangGraph StateGraph
-    |
-    +--> agent node (Groq LLM)
-    |         |
-    |         +--> Task Splitting Engine
-    |                 +--> Tavily Search
-    |                 +--> Wikipedia Lookup
-    |                 +--> Calculator
-    |
-    +--> tool node
-    |
-    +--> review node (factual grounding check)
-    |
-    +--> loop guard (max 5 iterations)
-    |
-    v
-Final answer + trace
+```mermaid
+flowchart TB
+    classDef frontend fill:#e1f5fe,stroke:#01579b,stroke-width:2px,color:#000
+    classDef backend fill:#f3e5f5,stroke:#4a148c,stroke-width:2px,color:#000
+    classDef agent fill:#e8f5e9,stroke:#1b5e20,stroke-width:2px,color:#000
+    classDef tools fill:#fff3e0,stroke:#e65100,stroke-width:2px,color:#000
+    classDef state fill:#eceff1,stroke:#263238,stroke-width:2px,color:#000
+
+    User((User)) --> |Interacts| Frontend
+
+    subgraph Frontend [Frontend Interface]
+        UI[Web Application<br/>HTML / CSS / Vanilla JS]:::frontend
+    end
+
+    subgraph Backend [FastAPI Backend]
+        API[API Router]:::backend
+        StreamAPI[SSE Streaming Endpoint]:::backend
+        SyncAPI[Sync JSON Endpoint]:::backend
+        Health[Health & Keep-alive]:::backend
+        API --> StreamAPI & SyncAPI & Health
+    end
+
+    UI -- "POST /agent/stream<br/>POST /agent/query" --> API
+
+    subgraph LangGraph [LangGraph StateGraph Engine]
+        direction TB
+        State[(AgentState)]:::state
+        
+        subgraph PreProcessing [Pre-Processing]
+            Intent[Intent Classifier<br/>Multi-intent, Subtasks]:::agent
+            Budget[Reasoning Budget<br/>Shallow / Medium / Deep]:::agent
+            Rewrite[Query Rewriter<br/>Variants generation]:::agent
+        end
+        
+        Planner[Planner Node<br/>Creates Execution Plan]:::agent
+        AgentLLM[Agent Node<br/>Groq LLM Llama-3.3-70b]:::agent
+        ToolNode[Tool Execution Node]:::agent
+
+        State --> PreProcessing
+        PreProcessing --> Planner
+        Planner --> AgentLLM
+        
+        AgentLLM -- "Tool Call" --> ToolNode
+        ToolNode -- "Observation" --> AgentLLM
+        AgentLLM -- "Loop Guard<br/>(Max Iterations)" --> AgentLLM
+        
+        AgentLLM -- "Review & Final Answer" --> State
+    end
+
+    SyncAPI & StreamAPI --> LangGraph
+
+    subgraph External [Tools & APIs]
+        Tavily[Tavily Web Search]:::tools
+        Wiki[Wikipedia Lookup]:::tools
+        Calc[Safe Calculator]:::tools
+        Fetch[Web Page Fetch]:::tools
+    end
+
+    ToolNode --> External
+    
+    LangGraph -.-> |Streaming Tokens & JSON| Backend
+    Backend -.-> |Responses| UI
 ```
 
 ## Features
