@@ -373,6 +373,7 @@ def _run_agent_sync(
     }
 
 
+@app.head("/ping")
 @app.get("/ping")
 async def ping() -> dict[str, str]:
     """Ultra-lightweight ping endpoint for cron jobs. No dependencies checked."""
@@ -416,6 +417,7 @@ async def on_startup():
     asyncio.create_task(_keep_alive_loop())
 
 
+@app.head("/health", response_model=HealthResponse)
 @app.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     return HealthResponse(
@@ -429,6 +431,7 @@ async def health() -> HealthResponse:
     )
 
 
+@app.head("/styles.css", include_in_schema=False)
 @app.get("/styles.css", include_in_schema=False)
 async def frontend_styles() -> FileResponse:
     css_file = FRONTEND_DIR / "styles.css"
@@ -437,6 +440,7 @@ async def frontend_styles() -> FileResponse:
     return FileResponse(css_file, media_type="text/css")
 
 
+@app.head("/app.js", include_in_schema=False)
 @app.get("/app.js", include_in_schema=False)
 async def frontend_script() -> FileResponse:
     js_file = FRONTEND_DIR / "app.js"
@@ -445,6 +449,7 @@ async def frontend_script() -> FileResponse:
     return FileResponse(js_file, media_type="application/javascript")
 
 
+@app.head("/", include_in_schema=False)
 @app.get("/", include_in_schema=False)
 async def root() -> FileResponse:
     index_file = FRONTEND_DIR / "index.html"
