@@ -367,6 +367,9 @@ If you see `ModuleNotFoundError: No module named 'langchain_core'`, you are runn
 
 ## Deployment
 
-For production deployment instructions, see [RENDER_DEPLOYMENT.md](RENDER_DEPLOYMENT.md).
+The system is optimized for Docker deployment on Render's free tier. It includes a built-in background task (`_keep_alive_loop`) that automatically pings the server to prevent idle spin-down.
 
-The system is optimized for Docker deployment on Render's free tier with automatic keep-alive via GitHub Actions.
+To deploy on Render:
+1. Connect this GitHub repository as a "Blueprint" instance using the `render.yaml` file.
+2. Provide your API keys (`GROQ_API_KEY`, `TAVILY_API_KEY`) when prompted.
+3. Render will automatically build the Docker image and expose port 8000.
