@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import json
+import time
 from functools import lru_cache
 from typing import Any
 
@@ -465,6 +466,113 @@ def _current_plan_step(plan: list[str], index: int) -> str:
     return plan[index]
 
 
+_RESULT_PREFIX_PATTERN = re.compile(r"(?is)^\s*(?:\*\*result:\*\*|result)\s*:\s*")
+_FENCED_JSON_PATTERN = re.compile(r"(?is)^```(?:json)?\s*(\{.*\}|\[.*\])\s*```$")
+
+
+def _parse_possible_tool_payload(raw_text: str) -> Any | None:
+    text = raw_text.strip()
+    if not text:
+        return None
+
+    candidates: list[str] = [text]
+    stripped_result_prefix = _RESULT_PREFIX_PATTERN.sub("", text, count=1).strip()
+    if stripped_result_prefix and stripped_result_prefix != text:
+        candidates.append(stripped_result_prefix)
+
+    fenced_match = _FENCED_JSON_PATTERN.match(text)
+    if fenced_match:
+        candidates.append(fenced_match.group(1).strip())
+
+    for candidate in candidates:
+        if not candidate or len(candidate) > 12000:
+            continue
+        if candidate[0] not in "{[":
+            continue
+        try:
+            payload = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, (dict, list)):
+            return payload
+
+    return None
+
+
+def _extract_payload_text(payload: Any) -> str | None:
+    if isinstance(payload, dict):
+        error_text = str(payload.get("error") or "").strip()
+        if error_text:
+            return error_text
+
+        results = payload.get("results")
+        if isinstance(results, list):
+            for result in results:
+                if isinstance(result, dict):
+                    snippet = str(result.get("snippet") or "").strip()
+                    if snippet:
+                        return snippet
+                    title = str(result.get("title") or "").strip()
+                    if title:
+                        return title
+                elif isinstance(result, str) and result.strip():
+                    return result.strip()
+
+    if isinstance(payload, list):
+        for item in payload:
+            if isinstance(item, str) and item.strip():
+                return item.strip()
+            if isinstance(item, dict):
+                snippet = str(item.get("snippet") or "").strip()
+                if snippet:
+                    return snippet
+
+    return None
+
+
+def _is_raw_tool_payload_text(answer: str) -> bool:
+    payload = _parse_possible_tool_payload(answer)
+    if isinstance(payload, dict):
+        return "results" in payload or "error" in payload
+    return False
+
+
+def _normalize_answer_text(answer: str, answer_type: str) -> str:
+    normalized = str(answer or "").strip()
+    if not normalized:
+        return ""
+
+    payload = _parse_possible_tool_payload(normalized)
+    if payload is None:
+        return normalized
+
+    extracted = _extract_payload_text(payload)
+    if not extracted:
+        return normalized
+
+    if answer_type == ANSWER_CALCULATION:
+        return f"**Result:** {extracted}"
+
+    if answer_type == ANSWER_MULTI:
+        return normalized
+
+    if isinstance(payload, dict) and isinstance(payload.get("results"), list):
+        lines: list[str] = []
+        for result in payload.get("results", [])[:3]:
+            if not isinstance(result, dict):
+                continue
+            title = str(result.get("title") or "").strip()
+            snippet = str(result.get("snippet") or "").strip()
+            url = str(result.get("url") or "").strip()
+            item = " - ".join(part for part in [title, snippet, url] if part)
+            if item:
+                lines.append(item)
+        if lines:
+            return "**Answer:**\n" + "\n".join(f"- {line}" for line in lines)
+
+    return extracted
+
+
 def _maybe_answer_calculation(query: str) -> str | None:
     expression = extract_math_expression(query)
     if not expression:
@@ -475,10 +583,10 @@ def _maybe_answer_calculation(query: str) -> str | None:
     except Exception:
         return None
 
-    result_text = str(result).strip()
+    result_text = _extract_payload_text(_parse_possible_tool_payload(str(result)) or result) or str(result).strip()
     if not result_text:
         return None
-    return f"Result: {result_text}"
+    return f"**Result:** {result_text}"
 
 
 def _resolve_answer_type(state: AgentState) -> str:
@@ -524,8 +632,6 @@ def _answer_quality_issues(
 ) -> list[str]:
     normalized_answer = answer.lower()
     issues: list[str] = []
-    used_tools = {tool_name.lower() for tool_name in (tool_calls_made or [])}
-    search_tools_used = any(tool in used_tools for tool in {"tavily_search", "wikipedia_lookup", "page_fetch"})
 
     def has_table() -> bool:
         return any("|" in line for line in answer.splitlines())
@@ -535,6 +641,9 @@ def _answer_quality_issues(
             token in normalized_answer
             for token in ["tradeoff", "trade-off", "best for", "better when", "use case", "works well", "less suited"]
         )
+
+    if _is_raw_tool_payload_text(answer):
+        issues.append("raw tool payload leaked into final answer")
 
     # ── Format checks (all budgets) ──────────────────────────────────────────
     if answer_type == ANSWER_COMPARISON or intent == INTENT_COMPARATIVE:
@@ -666,6 +775,43 @@ def _safe_fallback_answer(answer_type: str) -> str:
     if answer_type == ANSWER_AMBIGUOUS:
         return "Clarify one thing: Could you clarify what you mean?"
     return "**TL;DR:** I could not produce a reliable answer from the available sources."
+
+
+def _time_budget_exceeded(state: AgentState) -> bool:
+    started_at = state.get("started_at")
+    max_wall_time_s = state.get("max_wall_time_s")
+    if started_at is None or max_wall_time_s is None:
+        return False
+    try:
+        return (time.perf_counter() - float(started_at)) > float(max_wall_time_s)
+    except (TypeError, ValueError):
+        return False
+
+
+def _build_timeout_node():
+    def timeout_node(state: AgentState) -> dict[str, Any]:
+        answer_type = _resolve_answer_type(state)
+        iteration_count = int(state.get("iteration_count", 0))
+        max_iterations = int(state.get("max_iterations", 0))
+        reason = "time budget exceeded" if _time_budget_exceeded(state) else "max iterations reached"
+        safe_answer = _safe_fallback_answer(answer_type)
+        return {
+            "messages": [AIMessage(content=safe_answer)],
+            "final_answer": safe_answer,
+            "final_answer_reviewed": True,
+            "needs_retry": False,
+            "validation_errors": [reason],
+            "answer_format_ok": False,
+            "metrics": {
+                "plan_length": len(state.get("plan", []) or []),
+                "steps": iteration_count,
+                "reasoning_budget": _resolve_reasoning_budget(state),
+                "stop_reason": reason,
+                "max_iterations": max_iterations,
+            },
+        }
+
+    return timeout_node
 
 
 def _build_agent_node(model_name: str, temperature: float):
@@ -813,7 +959,7 @@ def _build_agent_node(model_name: str, temperature: float):
         else:
             content = str(response.content or "").strip()
             if content:
-                updates["final_answer"] = content
+                updates["final_answer"] = _normalize_answer_text(content, answer_type)
                 updates["final_answer_reviewed"] = False
 
         return updates
@@ -930,6 +1076,7 @@ def _build_review_node(model_name: str, temperature: float):
         draft_answer = str(state.get("final_answer") or "").strip()
         if not draft_answer:
             draft_answer = _best_available_answer_from_messages(messages)
+        draft_answer = _normalize_answer_text(draft_answer, _resolve_answer_type(state))
 
         if not draft_answer:
             return {"final_answer_reviewed": True}
@@ -953,6 +1100,7 @@ def _build_review_node(model_name: str, temperature: float):
             issues.extend(critic_issues)
 
         if answer_type in {ANSWER_AMBIGUOUS, ANSWER_CALCULATION, ANSWER_MULTI, ANSWER_EXPLANATION}:
+            draft_answer = _normalize_answer_text(draft_answer, answer_type)
             return {
                 "messages": [AIMessage(content=draft_answer)],
                 "final_answer": draft_answer,
@@ -990,9 +1138,6 @@ Instructions:
                     response_template=_build_response_template(intent, answer_type),
                     issues="\n".join(f"- {issue}" for issue in issues) if issues else "- None",
                     query=query,
-                    intent=intent,
-                    answer_type=answer_type,
-                    draft_answer=draft_answer,
                     evidence=evidence,
                 )
             ),
@@ -1005,6 +1150,7 @@ Instructions:
             candidate_answer = str(response.content or "").strip()
             if candidate_answer:
                 candidate_answer = _restore_collapsed_formatting(candidate_answer, answer_type)
+                candidate_answer = _normalize_answer_text(candidate_answer, answer_type)
                 revised_answer = candidate_answer
             issues = _answer_quality_issues(
                 revised_answer,
@@ -1059,7 +1205,7 @@ Evidence:
                 )
             )
 
-        revised_answer = _restore_collapsed_formatting(revised_answer, answer_type)
+        revised_answer = _normalize_answer_text(_restore_collapsed_formatting(revised_answer, answer_type), answer_type)
         
         return {
             "messages": [AIMessage(content=revised_answer)],
@@ -1075,10 +1221,10 @@ Evidence:
 
 def _build_validate_node():
     def validate_node(state: AgentState) -> dict[str, Any]:
-        answer = str(state.get("final_answer") or "").strip()
+        answer_type = _resolve_answer_type(state)
+        answer = _normalize_answer_text(str(state.get("final_answer") or "").strip(), answer_type)
         messages = list(state.get("messages", []))
         intent = str(state.get("intent", INTENT_DISCOVERY))
-        answer_type = _resolve_answer_type(state)
         budget = _resolve_reasoning_budget(state)
 
         # Budget-aware max retries: shallow=0, medium=1, deep=2
@@ -1149,6 +1295,7 @@ def _build_validate_node():
 
         return {
             "needs_retry": False,
+            "final_answer": answer,
             "validation_errors": issues,
             "answer_format_ok": not issues,
         }
@@ -1161,7 +1308,7 @@ def _best_available_answer_from_messages(messages: list[Any]) -> str:
         if isinstance(message, AIMessage):
             content = str(message.content or "").strip()
             if content:
-                return content
+                return _normalize_answer_text(content, _resolve_answer_type({"messages": messages}))
 
     observations: list[str] = []
     for message in messages:
@@ -1171,19 +1318,30 @@ def _best_available_answer_from_messages(messages: list[Any]) -> str:
                 observations.append(content)
 
     if observations:
-        return observations[-1]
+        return _normalize_answer_text(observations[-1], _resolve_answer_type({"messages": messages}))
 
     return ""
 
 
 def _should_continue(state: AgentState) -> str:
     max_iterations = int(state.get("max_iterations", 5))
-    if int(state.get("iteration_count", 0)) >= max_iterations:
-        return END
+    iteration_count = int(state.get("iteration_count", 0))
+    final_answer = str(state.get("final_answer") or "").strip()
+    final_answer_reviewed = bool(state.get("final_answer_reviewed", False))
+
+    if _time_budget_exceeded(state):
+        if final_answer and not final_answer_reviewed:
+            return "evidence_pack"
+        return "timeout"
+
+    if iteration_count >= max_iterations:
+        if final_answer and not final_answer_reviewed:
+            return "evidence_pack"
+        return "timeout"
 
     if (
         str(state.get("confidence") or "").lower() == "high"
-        and bool(state.get("final_answer_reviewed", False))
+        and final_answer_reviewed
         and not bool(state.get("needs_retry", False))
     ):
         return END
@@ -1196,9 +1354,8 @@ def _should_continue(state: AgentState) -> str:
     if isinstance(last_message, AIMessage) and getattr(last_message, "tool_calls", None):
         return "tools"
 
-    final_answer = str(state.get("final_answer") or "").strip()
     if isinstance(last_message, AIMessage) and final_answer:
-        if not bool(state.get("final_answer_reviewed", False)):
+        if not final_answer_reviewed:
             return "evidence_pack"
         if bool(state.get("needs_retry", False)):
             return "agent"
@@ -1222,6 +1379,7 @@ def build_graph(model_name: str | None = None, temperature: float | None = None)
     evidence_pack_node = _build_evidence_pack_node()
     review_node = _build_review_node(resolved_model_name, resolved_temperature)
     validate_node = _build_validate_node()
+    timeout_node = _build_timeout_node()
     tool_node = ToolNode(tools)
 
     workflow = StateGraph(AgentState)
@@ -1230,12 +1388,18 @@ def build_graph(model_name: str | None = None, temperature: float | None = None)
     workflow.add_node("evidence_pack_builder", evidence_pack_node)
     workflow.add_node("review", review_node)
     workflow.add_node("validate", validate_node)
+    workflow.add_node("timeout", timeout_node)
     workflow.add_node("tools", tool_node)
     workflow.add_edge(START, "planner")
     workflow.add_edge("planner", "agent")
-    workflow.add_conditional_edges("agent", _should_continue, {"tools": "tools", "evidence_pack": "evidence_pack_builder", END: END})
+    workflow.add_conditional_edges(
+        "agent",
+        _should_continue,
+        {"tools": "tools", "evidence_pack": "evidence_pack_builder", "timeout": "timeout", END: END},
+    )
     workflow.add_edge("tools", "agent")
     workflow.add_edge("evidence_pack_builder", "review")
     workflow.add_edge("review", "validate")
     workflow.add_conditional_edges("validate", _should_retry_after_validation, {"agent": "agent", END: END})
+    workflow.add_edge("timeout", END)
     return workflow.compile()

@@ -6,7 +6,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 
-from api.app import _best_available_answer, _extract_sources, _extract_trace, app
+from api.app import _best_available_answer, _extract_sources, _extract_trace, _normalize_response_answer, app
 
 FAKE_RESULT = {
     "answer": "RAG stands for Retrieval-Augmented Generation.",
@@ -102,7 +102,7 @@ class FrontendSmokeTests(unittest.TestCase):
         self.assertEqual(sources[1]["url"], "https://en.wikipedia.org/wiki/Retrieval-augmented_generation")
 
     def test_stream_endpoint_emits_final_result(self) -> None:
-        def fake_stream_run(query, max_iterations, model_name, depth_mode=None, callbacks=None):
+        def fake_stream_run(query, max_iterations, model_name, depth_mode=None, callbacks=None, is_streaming=False):
             for callback in callbacks or []:
                 callback.on_llm_new_token("RAG ")
                 callback.on_llm_new_token("answer")
@@ -138,6 +138,13 @@ class FrontendSmokeTests(unittest.TestCase):
 
         self.assertNotEqual(answer, "Stale draft answer.")
         self.assertTrue(answer)
+
+    def test_normalize_response_answer_converts_result_json_payload(self) -> None:
+        normalized = _normalize_response_answer(
+            'Result: {"results":[{"title":"Calculation Result","url":"calculator","snippet":"576"}]}',
+            "calculation",
+        )
+        self.assertEqual(normalized, "**Result:** 576")
 
 
 if __name__ == "__main__":

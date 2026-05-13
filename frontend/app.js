@@ -83,12 +83,64 @@ function formatInlineMarkdown(text) {
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
 }
 
+function normalizeAnswerText(answer) {
+  const text = String(answer || '').trim();
+  if (!text) {
+    return '';
+  }
+
+  const parsePayload = (raw) => {
+    const candidates = [raw.trim()];
+    const stripped = raw.replace(/^\s*(?:\*\*result:\*\*|result)\s*:\s*/i, '').trim();
+    if (stripped && stripped !== raw.trim()) {
+      candidates.push(stripped);
+    }
+
+    for (const candidate of candidates) {
+      if (!candidate || candidate.length > 12000 || !/^[{\[]/.test(candidate)) {
+        continue;
+      }
+      try {
+        return JSON.parse(candidate);
+      } catch (error) {
+        // ignore parse failures
+      }
+    }
+    return null;
+  };
+
+  const payload = parsePayload(text);
+  if (!payload || typeof payload !== 'object') {
+    return text;
+  }
+
+  if (Array.isArray(payload.results) && payload.results.length > 0) {
+    const first = payload.results[0];
+    if (first && typeof first === 'object') {
+      const snippet = String(first.snippet || '').trim();
+      if (snippet) {
+        return `**Result:** ${snippet}`;
+      }
+    }
+  }
+
+  if (typeof payload.error === 'string' && payload.error.trim()) {
+    return payload.error.trim();
+  }
+
+  return text;
+}
+
 function isSectionLine(line) {
   return /^(\d+)\.\s+(?:\*\*(.+?)\*\*|([^:]+?)):\s*(.*)$/.exec(line);
 }
 
 function isHeadingLine(line) {
   return /^(#{1,3})\s+(.+)$/.exec(line);
+}
+
+function isBoldHeadingLine(line) {
+  return /^\*\*([^*]+)\*\*(?::\s*(.*))?$/.exec(line);
 }
 
 function isBulletLine(line) {
@@ -143,7 +195,7 @@ function renderMarkdownTable(rows) {
 }
 
 function renderMarkdownContent(text) {
-  const lines = String(text || '').replaceAll('\r\n', '\n').split('\n');
+  const lines = normalizeAnswerText(String(text || '')).replaceAll('\r\n', '\n').split('\n');
   const blocks = [];
   let index = 0;
 
@@ -204,6 +256,18 @@ function renderMarkdownContent(text) {
     if (headingMatch) {
       const headingText = headingMatch[2];
       blocks.push(`<h3 class="answer-heading">${formatInlineMarkdown(headingText)}</h3>`);
+      index += 1;
+      continue;
+    }
+
+    const boldHeadingMatch = isBoldHeadingLine(line);
+    if (boldHeadingMatch) {
+      const headingText = boldHeadingMatch[1] || '';
+      const trailing = (boldHeadingMatch[2] || '').trim();
+      blocks.push(`<h3 class="answer-heading">${formatInlineMarkdown(headingText)}</h3>`);
+      if (trailing) {
+        blocks.push(`<p class="answer-paragraph">${formatInlineMarkdown(trailing)}</p>`);
+      }
       index += 1;
       continue;
     }
@@ -288,7 +352,7 @@ function renderMeta(result) {
   }
 
   if (Array.isArray(result.plan) && result.plan.length > 0) {
-    elements.resultMeta.innerHTML += ` <span class="meta-chip"><strong>Plan:</strong> ${escapeHtml(truncateText(result.plan.join(' → '), 140))}</span>`;
+    elements.resultMeta.innerHTML += ` <span class="meta-chip"><strong>Plan:</strong> ${escapeHtml(truncateText(result.plan.join(' -> '), 140))}</span>`;
   }
 
   if (Array.isArray(result.validation_errors) && result.validation_errors.length > 0) {

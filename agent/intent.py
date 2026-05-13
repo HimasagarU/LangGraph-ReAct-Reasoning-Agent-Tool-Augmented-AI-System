@@ -171,6 +171,25 @@ _MATH_TOKEN_PATTERN = re.compile(r"\d")
 _MATH_ALLOWED_PATTERN = re.compile(r"^[0-9+\-*/().,\s]+$")
 _MATH_OPERATOR_PATTERN = re.compile(r"[+\-*/]")
 _SINGLE_WORD_AMBIGUOUS = {"apple", "python", "java", "rust", "react", "rag"}
+_EVALUATIVE_TERMS: Final[tuple[str, ...]] = (
+    "good",
+    "better",
+    "best",
+    "bad",
+    "suitable",
+    "appropriate",
+    "worth it",
+    "enough",
+    "useful",
+)
+_CONTEXT_MISSING_PATTERNS: Final[tuple[str, ...]] = (
+    "is this",
+    "should i use",
+    "what should i use",
+    "is it good",
+    "is this good",
+    "which one should i use",
+)
 
 
 def tokenize_bm25(text: str) -> list[str]:
@@ -218,6 +237,20 @@ def contains_math_expression(query: str) -> bool:
     return (has_calc_prefix or has_parentheses or operator_count >= 1) and has_math_context
 
 
+def is_underspecified_evaluative_query(query: str) -> bool:
+    normalized = " ".join(query.strip().lower().split())
+    if not normalized:
+        return False
+
+    if contains_math_expression(normalized):
+        return False
+
+    has_evaluative_term = any(term in normalized for term in _EVALUATIVE_TERMS)
+    has_missing_context_pattern = any(pattern in normalized for pattern in _CONTEXT_MISSING_PATTERNS)
+    word_count = len(normalized.split())
+    return (has_evaluative_term and word_count <= 8) or has_missing_context_pattern
+
+
 def is_ambiguous_query(query: str) -> bool:
     """Return whether the query is short and underspecified enough to require clarification."""
     normalized = " ".join(query.strip().split())
@@ -229,6 +262,8 @@ def is_ambiguous_query(query: str) -> bool:
         return False
     if contains_math_expression(normalized):
         return False
+    if is_underspecified_evaluative_query(lowered):
+        return True
     if _AMBIGUOUS_HINTS.search(normalized):
         return False
 
@@ -274,6 +309,15 @@ def route_query(query: str) -> dict[str, Any]:
     """
     answer_type = classify_answer_type(query)
     query_stripped = query.strip()
+
+    if answer_type == ANSWER_AMBIGUOUS:
+        _log_classification(query_stripped, INTENT_DISCOVERY, 1.0, fallback="ambiguous_override")
+        return {
+            "intent": INTENT_DISCOVERY,
+            "answer_type": ANSWER_AMBIGUOUS,
+            "confidence": 1.0,
+            "route_source": "ambiguous_override",
+        }
 
     multi = detect_multi_intent(query_stripped)
     if multi:
@@ -328,8 +372,22 @@ def classify_answer_type(query: str) -> str:
     q = query.lower().strip()
     padded_q = f" {q} "
 
-    # Critical edge cases: binary factual prefixes and math detection.
+    if contains_math_expression(q):
+        return ANSWER_CALCULATION
+
+    if any(token in padded_q for token in _COMPARISON_TERMS):
+        return ANSWER_COMPARISON
+
+    if is_underspecified_evaluative_query(q):
+        return ANSWER_AMBIGUOUS
+
+    if is_ambiguous_query(q):
+        return ANSWER_AMBIGUOUS
+
+    # Critical edge cases: binary factual prefixes.
     if q.startswith(("is ", "was ", "are ", "does ", "did ")):
+        if any(term in q for term in _EVALUATIVE_TERMS):
+            return ANSWER_AMBIGUOUS
         return ANSWER_FACT
 
     # If query has plural indicators (1st, 2nd, 3rd, categories, places), treat as LIST
@@ -350,15 +408,6 @@ def classify_answer_type(query: str) -> str:
 
     if any(token in q for token in _FACT_TERMS):
         return ANSWER_FACT
-
-    if any(token in padded_q for token in _COMPARISON_TERMS):
-        return ANSWER_COMPARISON
-
-    if contains_math_expression(q):
-        return ANSWER_CALCULATION
-
-    if is_ambiguous_query(q):
-        return ANSWER_AMBIGUOUS
 
     # Short queries are likely ambiguous
     if len(q.split()) <= 2:

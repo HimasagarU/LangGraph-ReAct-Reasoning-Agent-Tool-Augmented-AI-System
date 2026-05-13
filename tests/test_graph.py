@@ -4,8 +4,10 @@ import unittest
 from unittest.mock import patch
 
 from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.tools import tool
 
 from agent.graph import build_graph
+from agent import tools
 
 
 def _initial_state(query: str, answer_type: str, reasoning_budget: str = "medium") -> dict:
@@ -38,7 +40,7 @@ class _FakeModel:
         self.agent_calls = 0
         self.review_calls = 0
 
-    def bind_tools(self, tools):  # noqa: ANN001 - langchain-compatible shim
+    def bind_tools(self, _tools):  # noqa: ANN001 - langchain-compatible shim
         return self
 
     def invoke(self, prompt):
@@ -165,6 +167,48 @@ RAG is flexible, while fine-tuning is deeper but costlier."""
         self.assertTrue(len(answer) > 0, "Fact query should produce a non-empty answer")
         self.assertTrue(state.get("final_answer_reviewed"))
 
+    def test_tool_call_path_records_tavily(self) -> None:
+        @tool("tavily_search")
+        def _fake_tavily_tool(query: str) -> str:  # noqa: ARG001 - test double
+            """Return a deterministic Tavily-like payload for testing."""
+            return '{"results":[{"title":"RAG","url":"https://example.com","snippet":"RAG summary"}]}'
+
+        class _ToolCallModel:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def bind_tools(self, _tools):
+                return self
+
+            def invoke(self, prompt):
+                system_text = str(prompt[0].content if isinstance(prompt, list) and prompt else "")
+                if "production ReAct assistant" in system_text:
+                    self.calls += 1
+                    if self.calls == 1:
+                        return AIMessage(
+                            content="Searching...",
+                            tool_calls=[
+                                {
+                                    "name": "tavily_search",
+                                    "args": {"query": "RAG"},
+                                    "id": "call_1",
+                                    "type": "tool_call",
+                                }
+                            ],
+                        )
+                    return AIMessage(content="**Answer:** RAG is Retrieval-Augmented Generation.\n\n**Sources:** Tool results")
+                if "final answer reviewer" in system_text or "strict final-answer formatter" in system_text:
+                    return AIMessage(content="**Answer:** RAG is Retrieval-Augmented Generation.\n\n**Sources:** Tool results")
+                raise AssertionError(f"Unexpected prompt: {system_text[:200]}")
+
+        with patch("agent.graph._load_model", return_value=_ToolCallModel()):
+            with patch("agent.tools.tavily_search", new=_fake_tavily_tool):
+                graph = build_graph(model_name="test-model")
+                state = graph.invoke(_initial_state("What is RAG?", "fact", "medium"))
+
+        self.assertIn("tavily_search", state.get("tool_calls_made", []))
+        self.assertTrue(str(state.get("final_answer") or "").strip())
+
 
 class ReasoningBudgetTests(unittest.TestCase):
     """Tests for the adaptive reasoning budget computation."""
@@ -239,6 +283,28 @@ class CriticTests(unittest.TestCase):
         )
         taxonomy_issues = [i for i in issues if "taxonomy" in i]
         self.assertTrue(len(taxonomy_issues) > 0, f"Expected taxonomy issue, got: {issues}")
+
+    def test_calculation_fast_path_normalizes_tool_json_output(self) -> None:
+        from agent.graph import _maybe_answer_calculation
+
+        class _FakeCalculator:
+            def invoke(self, _payload):  # noqa: ANN001 - test double
+                return '{"results":[{"title":"Calculation Result","url":"calculator","snippet":"576"}]}'
+
+        with patch("agent.graph.calculator", _FakeCalculator()):
+            answer = _maybe_answer_calculation("Calculate 18 * (27 + 5)")
+
+        self.assertEqual(answer, "**Result:** 576")
+
+    def test_answer_quality_flags_raw_tool_payload(self) -> None:
+        from agent.graph import _answer_quality_issues
+        issues = _answer_quality_issues(
+            'Result: {"results":[{"title":"Calculation Result","url":"calculator","snippet":"576"}]}',
+            "calculation",
+            "technical",
+            "deep",
+        )
+        self.assertIn("raw tool payload leaked into final answer", issues)
 
 
 if __name__ == "__main__":

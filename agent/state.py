@@ -20,6 +20,8 @@ class AgentState(TypedDict, total=False):
     tool_calls_made: list[str]
     iteration_count: int
     max_iterations: int
+    started_at: float
+    max_wall_time_s: float
     confidence: str
     rewritten_query: str
     rewrite_variants: list[str]  # expanded query variants (deep budget)

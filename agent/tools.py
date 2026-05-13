@@ -177,7 +177,7 @@ def _safe_eval(expression: str) -> float:
     return result
 
 
-def _fallback_wikipedia_summary(query: str) -> str:
+def _fallback_wikipedia_summary(query: str, return_title: bool = False) -> str | tuple[str, str]:
     search_response = requests.get(
         "https://en.wikipedia.org/w/api.php",
         headers=_WIKIPEDIA_HEADERS,
@@ -194,10 +194,14 @@ def _fallback_wikipedia_summary(query: str) -> str:
     search_payload = search_response.json()
     search_hits = search_payload.get("query", {}).get("search", [])
     if not search_hits:
+        if return_title:
+            return "", "Wikipedia lookup failed: no results found."
         return "Wikipedia lookup failed: no results found."
 
     page_title = search_hits[0].get("title", "")
     if not page_title:
+        if return_title:
+            return "", "Wikipedia lookup failed: no title found for the search result."
         return "Wikipedia lookup failed: no title found for the search result."
 
     summary_response = requests.get(
@@ -210,13 +214,42 @@ def _fallback_wikipedia_summary(query: str) -> str:
 
     extract = str(summary_payload.get("extract") or "").strip()
     if extract:
+        if return_title:
+            return page_title, extract
         return extract
 
     description = str(summary_payload.get("description") or "").strip()
     if description:
+        if return_title:
+            return page_title, description
         return description
 
-    return f"Wikipedia summary unavailable for {page_title}."
+    summary = f"Wikipedia summary unavailable for {page_title}."
+    if return_title:
+        return page_title, summary
+    return summary
+
+
+def _build_wikipedia_fallback_result(query: str) -> dict[str, Any] | None:
+    try:
+        title, summary = _fallback_wikipedia_summary(query, return_title=True)
+    except Exception:
+        return None
+
+    if not title:
+        return None
+
+    url_title = quote(title.replace(" ", "_"))
+    url = f"https://en.wikipedia.org/wiki/{url_title}"
+    snippet = _clean_text(summary, 220)
+    if not snippet or "failed" in snippet.lower():
+        return None
+    return {
+        "title": title,
+        "url": url,
+        "snippet": snippet,
+        "score": score_source_quality(url, snippet=snippet, title=title),
+    }
 
 
 @tool("tavily_search")
@@ -239,6 +272,12 @@ def tavily_search(query: str) -> str:
         )
     except Exception as exc:
         return json.dumps({"results": [], "error": _handle_tool_error("Tavily search", exc)})
+
+    if isinstance(result, dict) and not result.get("results"):
+        fallback = _build_wikipedia_fallback_result(query)
+        if fallback:
+            return json.dumps({"results": [fallback], "fallback": "wikipedia_lookup"}, ensure_ascii=False)
+        return json.dumps({"results": [], "error": "Tavily search returned no results."}, ensure_ascii=False)
 
     return _format_tavily_results(result)
 

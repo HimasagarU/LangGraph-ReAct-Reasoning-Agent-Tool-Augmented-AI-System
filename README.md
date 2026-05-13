@@ -72,16 +72,41 @@ flowchart TB
     Backend -.-> |Responses| UI
 ```
 
+### LangGraph State Machine (ASCII)
+
+```
+START
+  |
+  v
+planner
+  |
+  v
+agent <--> tools
+  |
+  v
+evidence_pack_builder
+  |
+  v
+review
+  |
+  v
+validate ---- retry ----> agent
+  |
+  v
+timeout/fallback -----> END
+```
+
 ## Features
 
 - **Multi-intent routing (Work in Progress)**: Task-splitting for complex queries (e.g., "explain X and calculate Y").
 - Intent-aware tool routing for explanatory, SOTA, comparative, technical, and discovery queries.
 - Hardened factual grounding: forces tool usage for factual queries and rejects "unknown" hallucinations.
-- Three tools: Tavily web search, Wikipedia lookup, and a safe calculator.
+- Four tools: Tavily web search, Wikipedia lookup, safe calculator, and page fetch.
 - Structured JSON response with traceability and execution metrics.
+- Budget-aware memory recall (medium/deep budgets) with an opt-out via `MEMORY_ENABLED=false`.
 - Final answer review pass to reduce misleading or overly general claims.
 - Intent-specific answer templates for comparison questions and ML-learning style explanations.
-- SSE streaming endpoint for token events and live trace updates.
+- SSE streaming endpoint for token events and a final payload containing trace + sources.
 
 ## What This System Does Well
 
@@ -138,6 +163,18 @@ This agent performs best on tasks that require:
 - **Intent-aware routing**
   - Different query types trigger different response formats
 
+## Observability with LangSmith
+
+When `LANGSMITH_API_KEY` is set (and `LANGSMITH_TRACING=true`), every `/agent/query` and `/agent/stream` run emits a LangSmith trace.
+The trace includes:
+
+- Planner routing decisions and computed reasoning budget
+- Tool calls + raw tool outputs (Tavily, Wikipedia, page fetch, calculator)
+- Evidence pack aggregation and critic issues (deep budget)
+- Review/validation retries and any fallback stop reason
+
+Typical trace flow: `planner -> agent -> tools -> evidence_pack_builder -> review -> validate`.
+
 ## Observed Performance
 
 From manual testing:
@@ -163,6 +200,17 @@ cp .env.example .env
 
 Fill in `GROQ_API_KEY` and, if you want web search, `TAVILY_API_KEY`.
 
+To enable LangSmith tracing, also set:
+
+- `LANGSMITH_API_KEY`
+- `LANGSMITH_TRACING=true`
+- `LANGSMITH_PROJECT` (optional, defaults to `default` if unset)
+
+Optional runtime controls:
+
+- `MEMORY_ENABLED=false` to disable local memory writes.
+- `MAX_WALL_TIME_S=60` to enforce a hard stop for long chains.
+
 ## Reliability Guardrails
 
 The system includes several mechanisms to reduce misleading or unsupported outputs, but it does not guarantee correctness.
@@ -171,11 +219,13 @@ These include:
 
 - A fixed answer structure for comparison questions: Definition, Intuition, Table comparison, Use cases, Key insights.
 - A fixed answer structure for learning-style questions: Intuition, Step-by-step process, Formula, Example, Key insights.
-- **Factual Grounding Guardrails**: If an intent is classified as `fact`, the agent is prohibited from answering without invoking a search tool. It will automatically re-run the retrieval loop if it tries to hallucinate "information not specified."
-- **Task Isolation (WIP)**: For multi-intent queries, the system spawns isolated execution contexts for each subtask, preventing prompt leakage and ensuring each part follows its specific formatting template.
+- **Factual Grounding Guardrails**: If an intent is classified as `fact`, the agent is prohibited from answering without invoking a search tool. Missing-evidence answers trigger a retry (budget permitting).
+- **Task Isolation (WIP)**: Multi-intent subtasks are separated by scoped instructions, but still share the same message history.
 - **Uncertainty handling**: when evidence is weak or mixed, prefer neutral phrasing over definitive conclusions.
 - **A final answer review pass** that rewrites statements that appear misleading, overly broad, or overconfident.
 - **Technical grounding** through the current tool set, with graceful fallback behavior when source retrieval is weak or unavailable.
+- **Tool failure fallback**: Tavily no-hit results fall back to a Wikipedia summary when possible.
+- **Hard stop fallback**: If max iterations or wall time is exceeded, return a safe fallback response.
 
 For stricter technical accuracy, the next routing upgrade should add paper and documentation sources such as arXiv summaries, official docs, Stanford CS notes, or DeepLearning.ai material.
 
@@ -207,7 +257,7 @@ It demonstrates how LLMs can be orchestrated with tools, validation, and structu
 
 - Improve confidence scoring using semantic relevance instead of domain heuristics
 - Add better filtering and ranking of retrieved sources
-- Introduce memory for context-aware responses
+- Improve memory relevance (e.g., vector memory or stricter recall filters)
 - Add domain-specific tools such as research paper and documentation retrieval
 - Improve reasoning over retrieved evidence instead of relying primarily on direct generation
 
@@ -277,11 +327,37 @@ Run the unit tests with:
 python -m unittest discover -s tests
 ```
 
+Run linting with Ruff:
+
+```bash
+python -m ruff check .
+```
+
+CI runs Ruff + unit tests on push/PR via `.github/workflows/ci.yml`.
+
+Run the benchmark evaluation harness with:
+
+```bash
+python evals/run_eval.py
+```
+
+Notes:
+
+- Cases that require live LLM/tool calls are auto-skipped when provider credentials/network are unavailable.
+- The script still evaluates deterministic offline cases (for example, ambiguous and calculator routing).
+
+Optional flags:
+
+- `--cases evals/benchmark_cases.jsonl`
+- `--output evals/latest_eval_report.json`
+- `--model-name llama-3.3-70b-versatile`
+- `--reasoning-budget shallow|medium|deep`
+
 Then use the browser UI to validate the full flow:
 
 1. Open the root page at http://127.0.0.1:8000/.
 2. Click Refresh health and confirm the backend reports status, model, and tool availability.
-3. Try the sample chips for explain, compare, SOTA, calculate, and discovery queries, then switch the Depth selector to Learning ML, Standard, or Concise.
+3. Try the sample chips for explain, compare, SOTA, calculate, and discovery queries, then switch the Budget selector to Shallow, Medium, or Deep.
 4. Click Run query to verify the structured answer, trace, and raw JSON.
 5. Click Stream answer to verify the SSE path and live token output.
 

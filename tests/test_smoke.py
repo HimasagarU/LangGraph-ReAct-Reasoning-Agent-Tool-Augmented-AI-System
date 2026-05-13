@@ -54,6 +54,9 @@ class IntentSmokeTests(unittest.TestCase):
         self.assertFalse(contains_math_expression("Explain RAG / fine-tuning trade-offs"))
         self.assertEqual(classify_answer_type("Explain RAG / fine-tuning trade-offs"), ANSWER_EXPLANATION)
 
+    def test_evaluative_prompt_is_ambiguous(self) -> None:
+        self.assertEqual(classify_answer_type("Is this dataset good?"), ANSWER_AMBIGUOUS)
+
 
 if __name__ == "__main__":
     unittest.main()

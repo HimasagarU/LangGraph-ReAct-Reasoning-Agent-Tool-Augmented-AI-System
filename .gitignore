@@ -19,3 +19,6 @@ RENDER_DEPLOYMENT.md
 
 .agent_memory.jsonl
 agent/intent_logs.jsonl
+plan.md
+evals/latest_eval_report.json
+

@@ -23,13 +23,19 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from pydantic import BaseModel, Field
 
 from agent.graph import build_graph
+from agent.observability import build_trace_config, ensure_langsmith_env
 from agent.tools import score_source_quality
 import httpx
 
 load_dotenv()
+ensure_langsmith_env()
 
 DEFAULT_MODEL_NAME = os.getenv("MODEL_NAME", "llama-3.3-70b-versatile")
 DEFAULT_MAX_ITERATIONS = int(os.getenv("MAX_ITERATIONS", "5"))
+try:
+    DEFAULT_MAX_WALL_TIME_S = float(os.getenv("MAX_WALL_TIME_S", "60"))
+except ValueError:
+    DEFAULT_MAX_WALL_TIME_S = 60.0
 DONE_SENTINEL = object()
 
 app = FastAPI(
@@ -126,6 +132,68 @@ def _dedupe_preserve_order(values: list[str]) -> list[str]:
 
 
 _URL_PATTERN = re.compile(r"https?://[^\s)]+")
+_RESULT_PREFIX_PATTERN = re.compile(r"(?is)^\s*(?:\*\*result:\*\*|result)\s*:\s*")
+_FENCED_JSON_PATTERN = re.compile(r"(?is)^```(?:json)?\s*(\{.*\}|\[.*\])\s*```$")
+
+
+def _normalize_response_answer(answer: str, answer_type: str | None = None) -> str:
+    text = str(answer or "").strip()
+    if not text:
+        return ""
+
+    def _parse_payload(raw: str) -> Any | None:
+        candidates: list[str] = [raw.strip()]
+        stripped = _RESULT_PREFIX_PATTERN.sub("", raw.strip(), count=1).strip()
+        if stripped and stripped != raw.strip():
+            candidates.append(stripped)
+        fenced = _FENCED_JSON_PATTERN.match(raw.strip())
+        if fenced:
+            candidates.append(fenced.group(1).strip())
+
+        for candidate in candidates:
+            if not candidate or candidate[0] not in "{[" or len(candidate) > 12000:
+                continue
+            try:
+                payload = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, (dict, list)):
+                return payload
+        return None
+
+    def _extract_payload_text(payload: Any) -> str | None:
+        if isinstance(payload, dict):
+            error_text = str(payload.get("error") or "").strip()
+            if error_text:
+                return error_text
+            results = payload.get("results")
+            if isinstance(results, list):
+                for item in results:
+                    if isinstance(item, dict):
+                        snippet = str(item.get("snippet") or "").strip()
+                        if snippet:
+                            return snippet
+                        title = str(item.get("title") or "").strip()
+                        if title:
+                            return title
+                    elif isinstance(item, str) and item.strip():
+                        return item.strip()
+        return None
+
+    payload = _parse_payload(text)
+    if payload is None:
+        return text
+
+    extracted = _extract_payload_text(payload)
+    if not extracted:
+        return text
+
+    if answer_type == "calculation" or _RESULT_PREFIX_PATTERN.match(text):
+        return f"**Result:** {extracted}"
+
+    return extracted
+
+
 def _clean_snippet(snippet: str) -> str | None:
     cleaned = " ".join(snippet.split()).strip()
     if not cleaned:
@@ -281,13 +349,13 @@ def _best_available_answer(state: dict[str, Any]) -> str:
                 retry_cutoff = index
 
     if final_answer and (bool(state.get("final_answer_reviewed", False)) or retry_cutoff < 0):
-        return final_answer
+        return _normalize_response_answer(final_answer, str(state.get("answer_type") or "").strip() or None)
 
     for message in reversed(messages[retry_cutoff + 1 :]):
         if isinstance(message, AIMessage):
             content = str(message.content or "").strip()
             if content:
-                return content
+                return _normalize_response_answer(content, str(state.get("answer_type") or "").strip() or None)
 
     observations: list[str] = []
     for message in messages:
@@ -296,7 +364,7 @@ def _best_available_answer(state: dict[str, Any]) -> str:
             if content:
                 observations.append(content)
     if observations:
-        return observations[-1]
+        return _normalize_response_answer(observations[-1], str(state.get("answer_type") or "").strip() or None)
 
     return "I could not complete the task with the available evidence."
 
@@ -308,6 +376,8 @@ def _build_initial_state(query: str, reasoning_budget: str | None, max_iteration
         "tool_calls_made": [],
         "iteration_count": 0,
         "max_iterations": max_iterations,
+        "started_at": time.perf_counter(),
+        "max_wall_time_s": DEFAULT_MAX_WALL_TIME_S,
         "confidence": "low",
         "rewritten_query": "",
         "rewrite_variants": [],
@@ -328,22 +398,34 @@ def _run_agent_sync(
     model_name: str,
     reasoning_budget: str | None = None,
     callbacks: list[BaseCallbackHandler] | None = None,
+    is_streaming: bool = False,
 ) -> dict[str, Any]:
     started_at = time.perf_counter()
     graph = _compiled_graph(model_name, _resolve_temperature())
+    invoke_config = {
+        "callbacks": callbacks or [],
+        **build_trace_config(
+            query=query,
+            model_name=model_name,
+            max_iterations=max_iterations,
+            reasoning_budget=reasoning_budget,
+            is_streaming=is_streaming,
+        ),
+    }
     state = graph.invoke(
         _build_initial_state(
             query=query,
             reasoning_budget=reasoning_budget,
             max_iterations=max_iterations,
         ),
-        config={"callbacks": callbacks or []},
+        config=invoke_config,
     )
 
     if not isinstance(state, dict):
         raise RuntimeError("Agent graph returned an unexpected state payload.")
 
     answer = _best_available_answer(state)
+    answer = _normalize_response_answer(answer, str(state.get("answer_type") or "").strip() or None)
     tools_used = _dedupe_preserve_order([str(name) for name in state.get("tool_calls_made", []) if name])
     trace = _extract_trace(list(state.get("messages", [])), bool(state.get("final_answer_reviewed", False)))
     sources = _extract_sources(list(state.get("messages", [])))
@@ -427,6 +509,7 @@ async def health() -> HealthResponse:
         dependencies={
             "groq_api_key": bool(os.getenv("GROQ_API_KEY")),
             "tavily_api_key": bool(os.getenv("TAVILY_API_KEY")),
+            "langsmith_api_key": bool(os.getenv("LANGSMITH_API_KEY")),
         },
     )
 
@@ -491,6 +574,7 @@ async def _stream_agent_events(request: QueryRequest) -> AsyncIterator[str]:
                 _resolve_model_name(request.model_name),
                 request.effective_budget(),
                 callbacks=[callback_handler],
+                is_streaming=True,
             )
         except Exception as exc:  # pragma: no cover - background worker path
             result_box["error"] = exc
