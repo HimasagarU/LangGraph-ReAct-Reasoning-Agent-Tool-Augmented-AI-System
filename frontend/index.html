@@ -128,10 +128,21 @@
         </div>
         
         <div class="about-content">
-          <h3>What this project does</h3>
-          <p>This is a demonstration of an agentic reasoning architecture built using LangGraph. It showcases intent routing, tool selection, graph execution, and transparent trace visibility.</p>
+          <h3>System Architecture</h3>
+          <p>This application employs a modern, tool-augmented reasoning architecture using LangGraph. The frontend and backend are decoupled but served from a unified FastAPI application, enabling both synchronous execution and real-time Server-Sent Events (SSE) streaming.</p>
           
-          <h3>How routing works</h3>
+          <figure class="architecture-figure">
+            <!-- Ensure you save your architecture image as 'architecture.png' in the frontend folder -->
+            <img src="/static/architecture.png" alt="System Architecture Diagram" class="architecture-img" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';" />
+            <div class="img-placeholder" style="display:none; padding: 2rem; background: var(--bg-secondary); border: 1px dashed var(--border-color); text-align: center; border-radius: 8px;">
+              [Please save the architecture diagram as <strong>architecture.png</strong> in the frontend folder]
+            </div>
+          </figure>
+
+          <h3>The ReAct Loop</h3>
+          <p>The reasoning engine operates on a ReAct (Reasoning + Acting) loop. The agent evaluates the query, formulates a plan, and decides which tools to invoke. It continuously observes the output from external tools (such as Wikipedia or Tavily web search) until it builds a complete "evidence pack" to support its final answer.</p>
+
+          <h3>How Routing Works</h3>
           <p>Queries are evaluated by an ML Intent Classifier and fallback regex rules to route into specific paths. The system builds a short execution plan and restricts formats to prevent unnecessary verbosity.</p>
           <div class="intent-list">
             <article class="intent-card intent-explanatory">
@@ -152,11 +163,12 @@
             </article>
           </div>
 
-          <h3>Tech Stack</h3>
+          <h3>Tech Stack & Observability</h3>
           <ul>
             <li><strong>Agent Framework:</strong> LangGraph (Python)</li>
             <li><strong>LLM Inference:</strong> Groq (Llama-3.3-70b-versatile)</li>
-            <li><strong>Search:</strong> Tavily API & Wikipedia API</li>
+            <li><strong>Search Tools:</strong> Tavily API, Wikipedia API, Safe Calculator</li>
+            <li><strong>Tracing:</strong> Full observability powered by LangSmith</li>
             <li><strong>Frontend:</strong> Vanilla JS + HTML + CSS</li>
           </ul>
 

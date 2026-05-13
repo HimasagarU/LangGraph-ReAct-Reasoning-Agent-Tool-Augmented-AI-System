@@ -991,3 +991,16 @@ output {
     flex-direction: column;
   }
 }
+
+/* Architecture Image Styles */
+.architecture-figure {
+  margin: 2rem 0;
+  text-align: center;
+}
+.architecture-img {
+  max-width: 100%;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+}
+
