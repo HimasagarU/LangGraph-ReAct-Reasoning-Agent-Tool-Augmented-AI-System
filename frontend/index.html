@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -7,10 +8,13 @@
   <meta name="description" content="A simple demo of routing, tools, and reasoning steps." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
+    rel="stylesheet" />
   <link rel="stylesheet" href="/styles.css" />
   <script defer src="/app.js"></script>
 </head>
+
 <body>
   <div class="page-shell">
     <header class="top-bar">
@@ -32,8 +36,10 @@
           </label>
 
           <div class="example-row" id="example-row">
-            <button class="example-chip" type="button" data-query="What is the cash prize of the Turing Award?">Fact question</button>
-            <button class="example-chip" type="button" data-query="Compare RAG vs fine-tuning">Comparison question</button>
+            <button class="example-chip" type="button" data-query="What is the cash prize of the Turing Award?">Fact
+              question</button>
+            <button class="example-chip" type="button" data-query="Compare RAG vs fine-tuning">Comparison
+              question</button>
             <button class="example-chip" type="button" data-query="Calculate 18 * (27 + 5)">Math question</button>
             <button class="example-chip" type="button" data-query="What is RAG in AI?">Explanation question</button>
             <button class="example-chip" type="button" data-query="apple">Ambiguous input</button>
@@ -47,7 +53,7 @@
 
           <div class="composer-settings">
             <label class="inline-setting">
-              Max iterations: 
+              Max iterations:
               <input id="max-iterations" type="range" min="1" max="10" value="5" />
               <output id="max-iterations-value">5</output>
             </label>
@@ -126,24 +132,31 @@
         <div class="section-header">
           <h2>About</h2>
         </div>
-        
+
         <div class="about-content">
           <h3>System Architecture</h3>
-          <p>This application employs a modern, tool-augmented reasoning architecture using LangGraph. The frontend and backend are decoupled but served from a unified FastAPI application, enabling both synchronous execution and real-time Server-Sent Events (SSE) streaming.</p>
-          
+          <p>This application employs a modern, tool-augmented reasoning architecture using LangGraph. The frontend and
+            backend are decoupled but served from a unified FastAPI application, enabling both synchronous execution and
+            real-time Server-Sent Events (SSE) streaming.</p>
+
           <figure class="architecture-figure">
-            <!-- Ensure you save your architecture image as 'architecture.png' in the frontend folder -->
-            <img src="/static/architecture.png" alt="System Architecture Diagram" class="architecture-img" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';" />
-            <div class="img-placeholder" style="display:none; padding: 2rem; background: var(--bg-secondary); border: 1px dashed var(--border-color); text-align: center; border-radius: 8px;">
-              [Please save the architecture diagram as <strong>architecture.png</strong> in the frontend folder]
+            <img src="/static/architecture.jpg" alt="System Architecture Diagram" class="architecture-img"
+              onerror="this.style.display='none'; this.nextElementSibling.style.display='block';" />
+            <div class="img-placeholder"
+              style="display:none; padding: 2rem; background: var(--bg-secondary); border: 1px dashed var(--border-color); text-align: center; border-radius: 8px;">
+              [Please save the architecture diagram as <strong>architecture.jpg</strong> in the frontend folder]
             </div>
           </figure>
 
           <h3>The ReAct Loop</h3>
-          <p>The reasoning engine operates on a ReAct (Reasoning + Acting) loop. The agent evaluates the query, formulates a plan, and decides which tools to invoke. It continuously observes the output from external tools (such as Wikipedia or Tavily web search) until it builds a complete "evidence pack" to support its final answer.</p>
+          <p>The reasoning engine operates on a ReAct (Reasoning + Acting) loop. The agent evaluates the query,
+            formulates a plan, and decides which tools to invoke. It continuously observes the output from external
+            tools (such as Wikipedia or Tavily web search) until it builds a complete "evidence pack" to support its
+            final answer.</p>
 
           <h3>How Routing Works</h3>
-          <p>Queries are evaluated by an ML Intent Classifier and fallback regex rules to route into specific paths. The system builds a short execution plan and restricts formats to prevent unnecessary verbosity.</p>
+          <p>Queries are evaluated by an ML Intent Classifier and fallback regex rules to route into specific paths. The
+            system builds a short execution plan and restricts formats to prevent unnecessary verbosity.</p>
           <div class="intent-list">
             <article class="intent-card intent-explanatory">
               <strong>Explanatory</strong>
@@ -184,7 +197,7 @@
 
     <footer class="footer-note">
       Built for the LangGraph ReAct Agent backend.
-      
+
       <!-- Hidden legacy elements for JS compat -->
       <div style="display: none;">
         <button id="refresh-health-btn"></button>
@@ -200,4 +213,5 @@
     </footer>
   </div>
 </body>
+
 </html>
